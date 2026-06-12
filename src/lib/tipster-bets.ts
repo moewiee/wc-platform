@@ -3,6 +3,7 @@ import bcrypt from "bcryptjs";
 import { db, getMeta, nowIso, setMeta } from "./db";
 import { placeBet } from "./bets";
 import { ensureModelTips } from "./tips";
+import { marketsForMatch } from "./markets";
 import { MIN_STAKE_POINTS, STARTING_BALANCE_POINTS } from "./money";
 import type { Match, Tip, User } from "./types";
 
@@ -68,6 +69,26 @@ function getOrCreateTipsterUser(expert: string): User | null {
 
 const TIPSTER_BETS_INTERVAL_MS = 15 * 60 * 1000;
 const TIPSTER_WINDOW_MS = 24 * 60 * 60 * 1000;
+// How far a tip may be re-lined when its exact line is no longer quoted
+// (real bookmaker ladders shift; e.g. a model-era "O/U 2.5" tip when the
+// book only quotes 2.25 and 3.5).
+const MAX_RELINE_DISTANCE = 1.0;
+
+// Nearest currently-quoted line in the tip's market that still offers the
+// tip's selection, or null when nothing is acceptably close.
+function nearestQuotedLine(match: Match, tip: Tip): number | null {
+  if (tip.line === null) return null;
+  let best: number | null = null;
+  for (const mk of marketsForMatch(match)) {
+    if (mk.market !== tip.market || mk.line === null) continue;
+    if (!mk.selections.some((s) => s.selection === tip.selection)) continue;
+    if (best === null || Math.abs(mk.line - tip.line) < Math.abs(best - tip.line)) {
+      best = mk.line;
+    }
+  }
+  if (best === null || Math.abs(best - tip.line) > MAX_RELINE_DISTANCE) return null;
+  return Math.abs(best - tip.line) < 1e-9 ? null : best; // null = same line, nothing to do
+}
 
 // Place bets for unbet tips on matches kicking off within 24 h. Runs from
 // the sync loop; also makes sure the statistical personas have tipped those
@@ -96,6 +117,7 @@ export async function maybePlaceTipsterBets(
 
   for (const m of matches) ensureModelTips(m);
 
+  const matchById = new Map(matches.map((m) => [m.id, m]));
   const matchIds = matches.map((m) => m.id).join(",");
   const openTips = db
     .prepare(
@@ -118,8 +140,24 @@ export async function maybePlaceTipsterBets(
     if (res.bet) {
       linkBet.run(res.bet.id, tip.id);
       placed++;
+      continue;
     }
-    // else: selection not currently quoted (line moved) — retry next pass
+    // The tip's exact line may have left the book (ladders move). Re-line to
+    // the nearest quoted line, bet that, and update the published tip so the
+    // tip and its bet always say the same thing.
+    const match = matchById.get(tip.match_id);
+    const newLine = match ? nearestQuotedLine(match, tip) : null;
+    if (newLine === null) continue; // nothing close enough — retry next pass
+    const retry = placeBet(user.id, tip.match_id, tip.market, newLine, tip.selection, stake);
+    if (retry.bet) {
+      db.prepare("UPDATE tips SET line = ?, label = ?, bet_id = ? WHERE id = ?").run(
+        newLine,
+        retry.bet.label,
+        retry.bet.id,
+        tip.id
+      );
+      placed++;
+    }
   }
   return { placed, tips: openTips.length };
 }
