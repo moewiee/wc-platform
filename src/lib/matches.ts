@@ -5,6 +5,7 @@ import {
   fetchOddsEvents,
   fetchScores,
 } from "./odds-api";
+import { fetchEspnFinalScores } from "./espn";
 import { settleMatch } from "./bets";
 import { teamPairKey } from "./teams";
 import type { Match } from "./types";
@@ -120,11 +121,43 @@ export async function maybeRefreshOdds(force = false): Promise<SyncResult> {
   return { updated };
 }
 
+// A full-time result normalized from whichever score source we used.
+type FinalScore = {
+  apiId?: string;
+  home: string;
+  away: string;
+  homeScore: number;
+  awayScore: number;
+};
+
+// The Odds API scores feed (needs ODDS_API_KEY; matches by api_id first).
+async function fetchOddsApiFinals(): Promise<FinalScore[]> {
+  const scores = await fetchScores(3);
+  const finals: FinalScore[] = [];
+  for (const s of scores) {
+    if (!s.completed || !s.scores) continue;
+    const homeEntry = s.scores.find((e) => e.name === s.home_team);
+    const awayEntry = s.scores.find((e) => e.name === s.away_team);
+    if (!homeEntry || !awayEntry) continue;
+    const hs = Number(homeEntry.score);
+    const as = Number(awayEntry.score);
+    if (!Number.isInteger(hs) || !Number.isInteger(as)) continue;
+    finals.push({
+      apiId: s.id,
+      home: s.home_team,
+      away: s.away_team,
+      homeScore: hs,
+      awayScore: as,
+    });
+  }
+  return finals;
+}
+
 // Pull final scores for recently finished matches and settle all bets on them.
-// The API only provides goals, so corners/cards bets stay pending for the
-// admin to complete.
+// Source: The Odds API when a key is configured, otherwise ESPN's keyless
+// scoreboard. Both only provide goals, so corners/cards bets stay pending for
+// the admin to complete.
 export async function maybeSyncScores(force = false): Promise<SyncResult> {
-  if (!apiConfigured()) return { skipped: "No ODDS_API_KEY configured — settle matches from the Admin page." };
   const due = (
     db
       .prepare(
@@ -138,9 +171,16 @@ export async function maybeSyncScores(force = false): Promise<SyncResult> {
     return { skipped: "Scores were synced within the last 10 minutes." };
   }
   setMeta("last_scores_sync", nowIso());
-  let scores;
+  let finals: FinalScore[];
   try {
-    scores = await fetchScores(3);
+    finals = apiConfigured()
+      ? await fetchOddsApiFinals()
+      : (await fetchEspnFinalScores(3)).map((s) => ({
+          home: s.home_team,
+          away: s.away_team,
+          homeScore: s.home_score,
+          awayScore: s.away_score,
+        }));
     setMeta("last_api_error", "");
   } catch (e) {
     setMeta("last_api_error", e instanceof Error ? e.message : String(e));
@@ -158,18 +198,14 @@ export async function maybeSyncScores(force = false): Promise<SyncResult> {
   );
 
   let settled = 0;
-  for (const s of scores) {
-    if (!s.completed || !s.scores) continue;
+  for (const s of finals) {
     const match =
-      byApiId.get(s.id) ?? byPair.get(teamPairKey(s.home_team, s.away_team));
+      (s.apiId && byApiId.get(s.apiId)) ?? byPair.get(teamPairKey(s.home, s.away));
     if (!match) continue;
-    const homeEntry = s.scores.find((e) => e.name === s.home_team);
-    const awayEntry = s.scores.find((e) => e.name === s.away_team);
-    if (!homeEntry || !awayEntry) continue;
-    const hs = Number(homeEntry.score);
-    const as = Number(awayEntry.score);
-    if (!Number.isInteger(hs) || !Number.isInteger(as)) continue;
-    const res = settleMatch(match.id, { homeScore: hs, awayScore: as });
+    const res = settleMatch(match.id, {
+      homeScore: s.homeScore,
+      awayScore: s.awayScore,
+    });
     if (!res.error) settled++;
   }
   return { updated: settled };
