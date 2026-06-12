@@ -11,10 +11,16 @@ function toRow(match: Match): BoardRow {
   const markets = match.status === "scheduled" ? marketsForMatch(match) : [];
   const h2h = markets.find((m) => m.market === "h2h");
   const ah = markets.find((m) => m.market === "ah_goals");
+  // Show the most balanced O/U line (smallest over/under odds gap).
   const ous = markets.filter((m) => m.market === "ou_goals");
-  const ou =
-    ous.find((m) => m.line !== null && Math.abs(m.line - 2.5) < 0.01) ??
-    ous[Math.floor(ous.length / 2)];
+  const ouGap = (m: (typeof ous)[number]) => {
+    const over = m.selections.find((s) => s.selection === "over")?.odds;
+    const under = m.selections.find((s) => s.selection === "under")?.odds;
+    return over && under ? Math.abs(over - under) : Infinity;
+  };
+  const ou = ous.length
+    ? ous.reduce((a, b) => (ouGap(b) < ouGap(a) ? b : a))
+    : undefined;
   const pick = (mkt: typeof h2h, s: string) =>
     mkt?.selections.find((x) => x.selection === s)?.odds ?? null;
   const h = pick(h2h, "home");
