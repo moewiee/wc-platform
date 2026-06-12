@@ -29,7 +29,10 @@ interface EspnCompetitor {
 interface EspnEvent {
   id?: string;
   competitions?: {
-    status?: { type?: { state?: string; completed?: boolean } };
+    status?: {
+      displayClock?: string;
+      type?: { state?: string; completed?: boolean; shortDetail?: string };
+    };
     competitors?: EspnCompetitor[];
   }[];
 }
@@ -80,6 +83,54 @@ export async function fetchEspnFinalScores(
     });
   }
   return finals;
+}
+
+export interface EspnLiveScore {
+  home_team: string;
+  away_team: string;
+  home_score: number;
+  away_score: number;
+  clock: string; // "71'", "HT", "FT"
+}
+
+// Matches currently being played (state "in") or just ended but not yet
+// settled (state "post"), with the match clock — feeds the lobby's live
+// score display.
+export async function fetchEspnLiveScores(): Promise<EspnLiveScore[]> {
+  const from = new Date(Date.now() - 24 * 3600 * 1000);
+  const to = new Date(Date.now() + 24 * 3600 * 1000);
+  const url = `${SCOREBOARD_URL}?dates=${yyyymmdd(from)}-${yyyymmdd(to)}`;
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) {
+    const body = (await res.text()).slice(0, 300);
+    throw new Error(`ESPN scoreboard ${res.status}: ${body}`);
+  }
+  const data = (await res.json()) as { events?: EspnEvent[] };
+
+  const live: EspnLiveScore[] = [];
+  for (const ev of data.events ?? []) {
+    const comp = ev.competitions?.[0];
+    const status = comp?.status;
+    const state = status?.type?.state;
+    if (state !== "in" && state !== "post") continue;
+    const home = comp?.competitors?.find((c) => c.homeAway === "home");
+    const away = comp?.competitors?.find((c) => c.homeAway === "away");
+    if (!home?.team?.displayName || !away?.team?.displayName) continue;
+    const hs = Number(home.score);
+    const as = Number(away.score);
+    if (!Number.isInteger(hs) || !Number.isInteger(as)) continue;
+    live.push({
+      home_team: home.team.displayName,
+      away_team: away.team.displayName,
+      home_score: hs,
+      away_score: as,
+      clock:
+        state === "post"
+          ? "FT"
+          : status?.type?.shortDetail || status?.displayClock || "LIVE",
+    });
+  }
+  return live;
 }
 
 // Total cards across both teams from the match box score, with a red worth

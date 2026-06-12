@@ -5,6 +5,13 @@ import { useEffect, useState } from "react";
 import OddsButton from "./OddsButton";
 import type { SlipSelection } from "./BetSlip";
 
+interface LiveScore {
+  match_id: number;
+  home_score: number;
+  away_score: number;
+  clock: string;
+}
+
 export interface BoardRow {
   id: number;
   home: string;
@@ -48,8 +55,17 @@ function sel(
   };
 }
 
-function MatchRow({ row, now }: { row: BoardRow; now: number }) {
+function MatchRow({
+  row,
+  now,
+  live,
+}: {
+  row: BoardRow;
+  now: number;
+  live?: LiveScore;
+}) {
   const started = Date.parse(row.kickoff) <= now;
+  const inPlay = row.status === "scheduled" && started;
   const open = row.status === "scheduled" && !started;
   const time = new Date(row.kickoff).toLocaleTimeString([], {
     hour: "2-digit",
@@ -63,9 +79,9 @@ function MatchRow({ row, now }: { row: BoardRow; now: number }) {
         {row.group && (
           <div className="text-[10px] uppercase text-slate-500">Grp {row.group}</div>
         )}
-        {row.status === "scheduled" && started && (
+        {inPlay && (
           <div className="mt-0.5 rounded bg-rose-950 px-1 text-[9px] font-bold text-rose-400">
-            LIVE
+            {live ? `LIVE ${live.clock}` : "LIVE"}
           </div>
         )}
       </div>
@@ -76,11 +92,17 @@ function MatchRow({ row, now }: { row: BoardRow; now: number }) {
           {row.status === "finished" && (
             <span className="ml-2 font-mono text-[#f0b429]">{row.homeScore}</span>
           )}
+          {inPlay && live && (
+            <span className="ml-2 font-mono font-bold text-rose-400">{live.home_score}</span>
+          )}
         </div>
         <div className="truncate text-sm font-semibold text-slate-100 hover:text-[#ffd166]">
           {row.away}
           {row.status === "finished" && (
             <span className="ml-2 font-mono text-[#f0b429]">{row.awayScore}</span>
+          )}
+          {inPlay && live && (
+            <span className="ml-2 font-mono font-bold text-rose-400">{live.away_score}</span>
           )}
         </div>
         {row.venue && (
@@ -162,6 +184,34 @@ export default function OddsBoard({ rows }: { rows: BoardRow[] }) {
     setNow(Date.now());
   }, []);
 
+  // Live in-play scores, refreshed every minute while a match is running.
+  const [live, setLive] = useState<Record<number, LiveScore>>({});
+  useEffect(() => {
+    let stopped = false;
+    const poll = async () => {
+      const anyInPlay = rows.some(
+        (r) => r.status === "scheduled" && Date.parse(r.kickoff) <= Date.now()
+      );
+      if (!anyInPlay) return;
+      try {
+        const res = await fetch("/api/live", { cache: "no-store" });
+        if (!res.ok) return;
+        const data = (await res.json()) as { live?: LiveScore[] };
+        if (!stopped) {
+          setLive(Object.fromEntries((data.live ?? []).map((s) => [s.match_id, s])));
+        }
+      } catch {
+        // network hiccup — keep the previous scores
+      }
+    };
+    void poll();
+    const t = setInterval(() => void poll(), 60_000);
+    return () => {
+      stopped = true;
+      clearInterval(t);
+    };
+  }, [rows]);
+
   if (now === null) {
     return (
       <div className="space-y-2">
@@ -200,7 +250,7 @@ export default function OddsBoard({ rows }: { rows: BoardRow[] }) {
             </div>
           </div>
           {dayRows.map((r) => (
-            <MatchRow key={r.id} row={r} now={now} />
+            <MatchRow key={r.id} row={r} now={now} live={live[r.id]} />
           ))}
         </section>
       ))}
