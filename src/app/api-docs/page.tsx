@@ -189,6 +189,11 @@ curl -s -X DELETE ${BASE}/api/bets/7 -H "Authorization: Bearer $tok"`}</Code>
                 <td className="px-4 py-2">3.5 / 4.5 / 5.5</td>
               </tr>
               <tr>
+                <td className="px-4 py-2">btts</td>
+                <td className="px-4 py-2">yes · no</td>
+                <td className="px-4 py-2">—</td>
+              </tr>
+              <tr>
                 <td className="px-4 py-2">correct_score</td>
                 <td className="px-4 py-2">&quot;2-1&quot; … · other_home · other_draw · other_away</td>
                 <td className="px-4 py-2">—</td>

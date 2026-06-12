@@ -52,6 +52,7 @@ export default function MarketBoard({
   const ouGoals = markets.filter((m) => m.market === "ou_goals");
   const ouCorners = markets.filter((m) => m.market === "ou_corners");
   const ouCards = markets.filter((m) => m.market === "ou_cards");
+  const btts = markets.find((m) => m.market === "btts");
   const cs = markets.find((m) => m.market === "correct_score");
 
   const Panel = ({ title, children }: { title: string; children: React.ReactNode }) => (
@@ -84,14 +85,27 @@ export default function MarketBoard({
         </p>
       )}
 
-      {h2h && (
-        <Panel title={h2h.name}>
-          <div className="grid grid-cols-3 gap-2">
-            {h2h.selections.map((s) => (
-              <OddsButton key={s.selection} wide sub={s.label} sel={toSel(h2h, s)} disabled={closed} />
-            ))}
-          </div>
-        </Panel>
+      {(h2h || btts) && (
+        <div className="grid gap-4 sm:grid-cols-[3fr_2fr]">
+          {h2h && (
+            <Panel title={h2h.name}>
+              <div className="grid grid-cols-3 gap-2">
+                {h2h.selections.map((s) => (
+                  <OddsButton key={s.selection} wide sub={s.label} sel={toSel(h2h, s)} disabled={closed} />
+                ))}
+              </div>
+            </Panel>
+          )}
+          {btts && (
+            <Panel title={btts.name}>
+              <div className="grid grid-cols-2 gap-2">
+                {btts.selections.map((s) => (
+                  <OddsButton key={s.selection} wide sub={s.label} sel={toSel(btts, s)} disabled={closed} />
+                ))}
+              </div>
+            </Panel>
+          )}
+        </div>
       )}
 
       {(ahGoals || ahCorners) && (

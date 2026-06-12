@@ -107,8 +107,9 @@ curl -s -X DELETE http://localhost:3000/api/bets/7 -H "Authorization: Bearer $to
 ```
 
 Markets: `h2h` (`home|draw|away`), `ah_goals`/`ah_corners` (`home|away` + line),
-`ou_goals`/`ou_corners`/`ou_cards` (`over|under` + line), `correct_score`
-(`"2-1"`, …, `other_home|other_draw|other_away`). Odds are decimal ×1000.
+`ou_goals`/`ou_corners`/`ou_cards` (`over|under` + line), `btts` (`yes|no`),
+`correct_score` (`"2-1"`, …, `other_home|other_draw|other_away`). Odds are
+decimal ×1000.
 The server always prices from its own current odds — client odds are never
 trusted.
 

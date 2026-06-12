@@ -5,6 +5,7 @@ export type MarketType =
   | "ou_goals"
   | "ou_corners"
   | "ou_cards"
+  | "btts"
   | "correct_score";
 
 export type MatchStatus = "scheduled" | "finished" | "void";

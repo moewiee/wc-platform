@@ -281,6 +281,26 @@ export function marketsForMatch(match: Match): MatchMarket[] {
     }
   }
 
+  // Both teams to score.
+  {
+    let both = 0;
+    for (let i = 1; i <= MAX_GOALS; i++) {
+      for (let j = 1; j <= MAX_GOALS; j++) both += goals[i][j];
+    }
+    const no = Math.max(0, 1 - both);
+    if (both >= 0.02 && no >= 0.02) {
+      markets.push({
+        market: "btts",
+        name: "Both Teams To Score",
+        line: null,
+        selections: [
+          { selection: "yes", label: "Yes", odds: probsToOdds(both) },
+          { selection: "no", label: "No", odds: probsToOdds(no) },
+        ],
+      });
+    }
+  }
+
   // Goals over/under — quarter-step ladder around the expected total.
   {
     const totalDist = poissonRow(lh + la, MAX_GOALS * 2);
@@ -453,6 +473,10 @@ export function settleSelection(
     case "ou_cards":
       if (d.cardsTotal === null) return "pending";
       return settleTotals(d.cardsTotal, line ?? 4.5, selection);
+    case "btts": {
+      const both = d.homeScore > 0 && d.awayScore > 0;
+      return (selection === "yes") === both ? "win" : "lose";
+    }
     case "correct_score": {
       const inGrid = d.homeScore <= CS_GRID && d.awayScore <= CS_GRID;
       if (selection === "other_home")
