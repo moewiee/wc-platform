@@ -78,8 +78,9 @@ Restart the server after editing.
 
 ## REST API
 
-Authenticate with `Authorization: Bearer <token>` (or the browser session
-cookie). Get a token from register/login:
+Served at `http://localhost:3000` locally and `https://wc26.ankai.uk` in
+production (same endpoints). Authenticate with `Authorization: Bearer <token>`
+(or the browser session cookie). Get a token from register/login:
 
 ```bash
 # register / login → token
