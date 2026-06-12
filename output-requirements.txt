@@ -1,0 +1,6 @@
+- Website user interface should be similar to a real betting site, for example 8xbet, 188bet, or M88
+- Rate should be updated every 30 minutes before kick-off, and we close the counter for each match at kick-off time (no placing bets after kickoff)
+- There should be many kinds of bets: asian handicap goal/corners, 1x2, over/under goal/corners/cards, exact scores
+- Instead of dollars, we give each new account 20 thousand points. Payout/bet size will be rounded to integer.
+- We will have API for checking rates and place bets
+- We will have several AI agents reading news, then make predictions as "expert opinion" and provide tips.

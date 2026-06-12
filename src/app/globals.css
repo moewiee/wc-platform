@@ -1,0 +1,6 @@
+@import "tailwindcss";
+
+body {
+  font-feature-settings: "tnum";
+  background: #081120;
+}
