@@ -70,6 +70,11 @@ export interface BetWithMatch extends Bet {
   away_score: number | null;
 }
 
+export interface OpenBetRow extends BetWithMatch {
+  username: string;
+  is_bot: number;
+}
+
 export interface Txn {
   id: number;
   user_id: number;

@@ -12,7 +12,7 @@ import {
   MIN_STAKE_POINTS,
   payoutPoints,
 } from "./money";
-import type { Bet, BetWithMatch, MarketType, Match, Pick3 } from "./types";
+import type { Bet, BetWithMatch, MarketType, Match, OpenBetRow, Pick3 } from "./types";
 
 class BetError extends Error {}
 
@@ -367,6 +367,22 @@ const BET_WITH_MATCH = `
          m.status AS match_status, m.home_score, m.away_score
   FROM bets b JOIN matches m ON m.id = b.match_id
 `;
+
+// Every player's unsettled bets, for the public in-play board.
+export function listOpenBets(): OpenBetRow[] {
+  return db
+    .prepare(
+      `SELECT b.*, m.home_team, m.away_team, m.kickoff,
+              m.status AS match_status, m.home_score, m.away_score,
+              u.username, u.is_bot
+       FROM bets b
+       JOIN matches m ON m.id = b.match_id
+       JOIN users u ON u.id = b.user_id
+       WHERE b.status = 'pending'
+       ORDER BY b.created_at DESC, b.id DESC`
+    )
+    .all() as OpenBetRow[];
+}
 
 export function listUserBets(userId: number): BetWithMatch[] {
   return db
