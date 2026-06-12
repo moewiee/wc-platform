@@ -5,7 +5,12 @@ import {
   fetchOddsEvents,
   fetchScores,
 } from "./odds-api";
-import { fetchEspnCards, fetchEspnFinalScores, type EspnFinalScore } from "./espn";
+import {
+  fetchEspnCards,
+  fetchEspnFinalScores,
+  fetchEspnOdds,
+  type EspnFinalScore,
+} from "./espn";
 import { completeMatchData, settleMatch } from "./bets";
 import { teamPairKey } from "./teams";
 import type { Match } from "./types";
@@ -27,19 +32,51 @@ export function getMatch(id: number): Match | undefined {
 
 export type SyncResult = { updated: number } | { skipped: string };
 
-// Pull fresh 1X2 odds from The Odds API. Throttled so page loads don't burn
-// the free monthly quota; `force` is for the admin button.
+// A 1X2 quote normalized from whichever odds source we used.
+type OddsQuote = {
+  apiId: string;
+  home: string;
+  away: string;
+  kickoff: string;
+  oh: number | null;
+  od: number | null;
+  oa: number | null;
+};
+
+// Pull fresh 1X2 odds — The Odds API (bookmaker median) when a key is
+// configured, otherwise DraftKings prices via ESPN's keyless scoreboard.
+// Throttled so page loads don't burn quota; `force` is for the admin button.
 export async function maybeRefreshOdds(force = false): Promise<SyncResult> {
-  if (!apiConfigured()) return { skipped: "No ODDS_API_KEY configured — using seeded odds." };
   const last = getMeta("last_odds_refresh");
   if (!force && last && Date.now() - Date.parse(last) < ODDS_REFRESH_MS) {
     return { skipped: "Odds are fresh (refreshed within 30 minutes)." };
   }
   // Stamp before fetching so a failing API isn't hammered on every page load.
   setMeta("last_odds_refresh", nowIso());
-  let events;
+  let quotes: OddsQuote[];
   try {
-    events = await fetchOddsEvents();
+    if (apiConfigured()) {
+      quotes = (await fetchOddsEvents()).map((ev) => ({
+        apiId: ev.id,
+        home: ev.home_team,
+        away: ev.away_team,
+        kickoff: ev.commence_time,
+        oh: consensusOdds(ev, "home"),
+        od: consensusOdds(ev, "draw"),
+        oa: consensusOdds(ev, "away"),
+      }));
+    } else {
+      // Prefix ESPN ids so a later Odds API setup never collides on api_id.
+      quotes = (await fetchEspnOdds()).map((s) => ({
+        apiId: `espn:${s.espn_id}`,
+        home: s.home_team,
+        away: s.away_team,
+        kickoff: s.kickoff,
+        oh: s.odds_home,
+        od: s.odds_draw,
+        oa: s.odds_away,
+      }));
+    }
     setMeta("last_api_error", "");
   } catch (e) {
     setMeta("last_api_error", e instanceof Error ? e.message : String(e));
@@ -75,13 +112,9 @@ export async function maybeRefreshOdds(force = false): Promise<SyncResult> {
       VALUES (@apiId, @home, @away, @kickoff, @oh, @od, @oa, @now, 'live')
     `);
     const detachApiId = db.prepare("UPDATE matches SET api_id = NULL WHERE id = ?");
-    for (const ev of events) {
-      const oh = consensusOdds(ev, "home");
-      const od = consensusOdds(ev, "draw");
-      const oa = consensusOdds(ev, "away");
+    for (const q of quotes) {
       let found =
-        byApiId.get(ev.id) ??
-        byPair.get(teamPairKey(ev.home_team, ev.away_team));
+        byApiId.get(q.apiId) ?? byPair.get(teamPairKey(q.home, q.away));
       if (found && found.status !== "scheduled") {
         if (found.status === "void") {
           // A voided (postponed) match reappeared in the feed — free the
@@ -94,24 +127,24 @@ export async function maybeRefreshOdds(force = false): Promise<SyncResult> {
       }
       if (found) {
         update.run({
-          apiId: ev.id,
-          kickoff: ev.commence_time,
-          oh,
-          od,
-          oa,
+          apiId: q.apiId,
+          kickoff: q.kickoff,
+          oh: q.oh,
+          od: q.od,
+          oa: q.oa,
           now,
           id: found.id,
         });
       } else {
-        // New fixture from the API (e.g. knockout round pairing decided).
+        // New fixture from the feed (e.g. knockout round pairing decided).
         insert.run({
-          apiId: ev.id,
-          home: ev.home_team,
-          away: ev.away_team,
-          kickoff: ev.commence_time,
-          oh,
-          od,
-          oa,
+          apiId: q.apiId,
+          home: q.home,
+          away: q.away,
+          kickoff: q.kickoff,
+          oh: q.oh,
+          od: q.od,
+          oa: q.oa,
           now,
         });
       }

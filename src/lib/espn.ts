@@ -26,14 +26,23 @@ interface EspnCompetitor {
   team?: { displayName?: string };
   statistics?: EspnStatistic[];
 }
+interface EspnOddsSide {
+  open?: { odds?: string };
+  close?: { odds?: string };
+}
 interface EspnEvent {
   id?: string;
+  date?: string;
   competitions?: {
+    date?: string;
     status?: {
       displayClock?: string;
       type?: { state?: string; completed?: boolean; shortDetail?: string };
     };
     competitors?: EspnCompetitor[];
+    odds?: {
+      moneyline?: { home?: EspnOddsSide; away?: EspnOddsSide; draw?: EspnOddsSide };
+    }[];
   }[];
 }
 
@@ -83,6 +92,68 @@ export async function fetchEspnFinalScores(
     });
   }
   return finals;
+}
+
+// American moneyline ("+250", "-120", "EVEN") → decimal odds ×1000.
+function americanToDecimal(odds: string | undefined): number | null {
+  if (!odds) return null;
+  const s = odds.trim().toUpperCase();
+  if (s === "EVEN" || s === "PK") return 2000;
+  const n = Number(s.replace("+", ""));
+  if (!Number.isFinite(n) || n === 0) return null;
+  const dec = n > 0 ? 1 + n / 100 : 1 + 100 / -n;
+  return Math.max(1010, Math.min(200_000, Math.round(dec * 1000)));
+}
+
+export interface EspnOddsEvent {
+  espn_id: string;
+  home_team: string;
+  away_team: string;
+  kickoff: string;
+  odds_home: number; // decimal x1000
+  odds_draw: number;
+  odds_away: number;
+}
+
+// 1X2 quotes (DraftKings via ESPN) for upcoming matches — the keyless odds
+// source when no ODDS_API_KEY is configured. Events without a complete
+// moneyline (e.g. knockout placeholders) are skipped.
+export async function fetchEspnOdds(daysAhead = 45): Promise<EspnOddsEvent[]> {
+  const from = new Date(Date.now() - 6 * 3600 * 1000);
+  const to = new Date(Date.now() + daysAhead * 24 * 3600 * 1000);
+  const url = `${SCOREBOARD_URL}?dates=${yyyymmdd(from)}-${yyyymmdd(to)}`;
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) {
+    const body = (await res.text()).slice(0, 300);
+    throw new Error(`ESPN scoreboard ${res.status}: ${body}`);
+  }
+  const data = (await res.json()) as { events?: EspnEvent[] };
+
+  const quotes: EspnOddsEvent[] = [];
+  for (const ev of data.events ?? []) {
+    const comp = ev.competitions?.[0];
+    if (!ev.id || comp?.status?.type?.state !== "pre") continue;
+    const home = comp.competitors?.find((c) => c.homeAway === "home");
+    const away = comp.competitors?.find((c) => c.homeAway === "away");
+    if (!home?.team?.displayName || !away?.team?.displayName) continue;
+    const kickoffMs = Date.parse(ev.date ?? comp.date ?? "");
+    if (!Number.isFinite(kickoffMs)) continue;
+    const ml = comp.odds?.[0]?.moneyline;
+    const oh = americanToDecimal(ml?.home?.close?.odds ?? ml?.home?.open?.odds);
+    const od = americanToDecimal(ml?.draw?.close?.odds ?? ml?.draw?.open?.odds);
+    const oa = americanToDecimal(ml?.away?.close?.odds ?? ml?.away?.open?.odds);
+    if (!oh || !od || !oa) continue;
+    quotes.push({
+      espn_id: ev.id,
+      home_team: home.team.displayName,
+      away_team: away.team.displayName,
+      kickoff: new Date(kickoffMs).toISOString().replace(".000Z", "Z"),
+      odds_home: oh,
+      odds_draw: od,
+      odds_away: oa,
+    });
+  }
+  return quotes;
 }
 
 export interface EspnLiveScore {
