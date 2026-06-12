@@ -26,6 +26,11 @@ const SCORES_SYNC_MS = 10 * 60 * 1000;
 const MARKET_ODDS_REFRESH_MS = 10 * 60 * 1000;
 const MARKET_ODDS_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
+// The active 1X2 refresh cadence, for UI copy ("refreshed every N min").
+export function oddsRefreshMinutes(): number {
+  return (apiConfigured() ? ODDS_REFRESH_KEYED_MS : ODDS_REFRESH_KEYLESS_MS) / 60_000;
+}
+
 export function listMatches(): Match[] {
   return db.prepare("SELECT * FROM matches ORDER BY kickoff, id").all() as Match[];
 }

@@ -6,7 +6,7 @@ import TipsPanel from "@/components/TipsPanel";
 import { getCurrentUser } from "@/lib/auth";
 import { listUserBetsForMatch } from "@/lib/bets";
 import { marketsForMatch } from "@/lib/markets";
-import { getMatch, maybeRefreshOdds } from "@/lib/matches";
+import { getMatch, maybeRefreshOdds, oddsRefreshMinutes } from "@/lib/matches";
 import { fmtOdds, fmtPts } from "@/lib/money";
 import { ensureModelTips, getTips } from "@/lib/tips";
 import type { BetStatus } from "@/lib/types";
@@ -79,8 +79,8 @@ export default async function MatchPage({
         {match.odds_updated_at && match.status === "scheduled" && (
           <div className="mt-3 text-xs text-slate-500">
             Odds {match.odds_source === "live" ? "from live bookmakers" : "house prices"} ·
-            updated <LocalTime iso={match.odds_updated_at} /> · refreshed every 30 min ·
-            counter closes at kickoff
+            updated <LocalTime iso={match.odds_updated_at} /> · refreshed every{" "}
+            {oddsRefreshMinutes()} min · counter closes at kickoff
           </div>
         )}
       </div>
