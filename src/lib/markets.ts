@@ -183,6 +183,30 @@ function fmtLine(line: number): string {
 
 // ── Market generation ───────────────────────────────────────────────────────
 
+// Asian totals: integer lines push when total == line, quarter lines split
+// into the two adjacent half/integer lines (same W/R treatment as handicaps).
+function totalsFairOdds(
+  dist: number[],
+  line: number,
+  side: "over" | "under",
+  margin: number
+): number | null {
+  const halves = halvesOf(line);
+  let W = 0;
+  let R = 0;
+  for (const l of halves) {
+    for (let k = 0; k < dist.length; k++) {
+      const m = side === "over" ? k - l : l - k;
+      if (m > 1e-9) W += dist[k] / 2;
+      else if (Math.abs(m) <= 1e-9) R += dist[k] / 2;
+    }
+  }
+  if (W < 0.02) return null;
+  const priced = (1 - R) / W / margin;
+  if (priced <= 1.01) return null;
+  return Math.max(1010, Math.min(200_000, Math.round(priced * 1000)));
+}
+
 function totalsMarket(
   market: MarketType,
   name: string,
@@ -190,19 +214,28 @@ function totalsMarket(
   line: number,
   margin = MARGIN
 ): MatchMarket | null {
-  let over = 0;
-  for (let k = 0; k < dist.length; k++) if (k > line) over += dist[k];
-  const under = Math.max(0, 1 - over);
-  if (over < 0.02 || under < 0.02) return null;
+  const over = totalsFairOdds(dist, line, "over", margin);
+  const under = totalsFairOdds(dist, line, "under", margin);
+  if (over === null || under === null) return null;
   return {
     market,
     name: `${name} ${line}`,
     line,
     selections: [
-      { selection: "over", label: `Over ${line}`, odds: probsToOdds(over, margin) },
-      { selection: "under", label: `Under ${line}`, odds: probsToOdds(under, margin) },
+      { selection: "over", label: `Over ${line}`, odds: over },
+      { selection: "under", label: `Under ${line}`, odds: under },
     ],
   };
+}
+
+// base-1 .. base+1 in quarter steps (base is a half line, so the ladder mixes
+// integer, quarter and half lines).
+function quarterLadder(base: number): number[] {
+  const lines: number[] = [];
+  for (let l = base - 1; l <= base + 1.0001; l += 0.25) {
+    lines.push(Math.round(l * 4) / 4);
+  }
+  return lines;
 }
 
 export function marketsForMatch(match: Match): MatchMarket[] {
@@ -248,11 +281,11 @@ export function marketsForMatch(match: Match): MatchMarket[] {
     }
   }
 
-  // Goals over/under — three lines around the expected total.
+  // Goals over/under — quarter-step ladder around the expected total.
   {
     const totalDist = poissonRow(lh + la, MAX_GOALS * 2);
     const base = Math.max(1.5, Math.round(lh + la - 0.5) + 0.5);
-    for (const line of [base - 1, base, base + 1]) {
+    for (const line of quarterLadder(base)) {
       const m = totalsMarket("ou_goals", "Goals Over/Under", totalDist, line);
       if (m) markets.push(m);
     }
@@ -263,10 +296,10 @@ export function marketsForMatch(match: Match): MatchMarket[] {
   const share = Math.min(0.68, Math.max(0.32, 0.5 + (lh - la) * 0.07));
   const corners = scoreMatrix(cornersTotal * share, cornersTotal * (1 - share), MAX_CORNERS);
 
-  // Asian handicap (corners) — half-point steps.
+  // Asian handicap (corners) — quarter steps, like the goals handicap.
   {
     const candidates: number[] = [];
-    for (let l = -6; l <= 6.0001; l += 0.5) candidates.push(Math.round(l * 2) / 2);
+    for (let l = -6; l <= 6.0001; l += 0.25) candidates.push(Math.round(l * 4) / 4);
     const line = pickAhLine(corners, candidates);
     const oh = ahFairOdds(corners, line, "home");
     const oa = ahFairOdds(corners, -line, "away");
@@ -283,11 +316,11 @@ export function marketsForMatch(match: Match): MatchMarket[] {
     }
   }
 
-  // Corners over/under.
+  // Corners over/under — quarter-step ladder.
   {
     const dist = poissonRow(cornersTotal, MAX_CORNERS * 2);
     const base = Math.round(cornersTotal - 0.5) + 0.5;
-    for (const line of [base - 1, base, base + 1]) {
+    for (const line of quarterLadder(base)) {
       const m = totalsMarket("ou_corners", "Corners Over/Under", dist, line);
       if (m) markets.push(m);
     }
@@ -385,9 +418,14 @@ function settleAh(diff: number, line: number, selection: string): SettleOutcome 
 }
 
 function settleTotals(total: number, line: number, selection: string): SettleOutcome {
-  if (Math.abs(total - line) <= 1e-9) return "push";
-  const overWins = total > line;
-  return (selection === "over") === overWins ? "win" : "lose";
+  // Asian totals: integer line pushes on an exact hit, quarter line settles as
+  // half stake on each adjacent line. Half lines behave as plain win/lose.
+  const sign = selection === "over" ? 1 : -1;
+  const [l1, l2] = halvesOf(line);
+  return combineHalves(
+    ahHalfOutcome((total - l1) * sign),
+    ahHalfOutcome((total - l2) * sign)
+  );
 }
 
 export function settleSelection(
