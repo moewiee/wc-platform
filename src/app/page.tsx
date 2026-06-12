@@ -72,7 +72,10 @@ export default async function HomePage() {
             </h1>
             <p className="mt-1 text-sm text-slate-300">
               Asian handicap · Over/Under · 1X2 · Correct score · Corners & cards —
-              counter closes at kickoff.
+              counter closes at kickoff. Prefer code?{" "}
+              <Link href="/api-docs" className="font-semibold text-[#f0b429] hover:text-[#ffd166]">
+                Bet through the API →
+              </Link>
             </p>
           </div>
           {!user && (

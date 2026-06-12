@@ -17,6 +17,7 @@ export default function NavBar({ user }: { user: User | null }) {
             <Link href="/my-bets" className="hover:text-[#ffd166]">My Bets</Link>
           )}
           <Link href="/leaderboard" className="hover:text-[#ffd166]">Leaderboard</Link>
+          <Link href="/api-docs" className="hover:text-[#ffd166]">API</Link>
           {user && (
             <Link href="/account" className="hover:text-[#ffd166]">Account</Link>
           )}
