@@ -21,19 +21,11 @@ import { maybeRefreshMarketOdds, maybeRefreshOdds, maybeSyncScores } from "./mat
 import { fmtOdds, fmtPts, parseStakeToPoints } from "./money";
 import { generateAiTipsForUpcoming } from "./tips";
 import { maybePlaceTipsterBets } from "./tipster-bets";
-import type { MarketType } from "./types";
+import { MARKET_TYPES, type MarketType } from "./types";
 
 export type FormState = { error?: string; success?: string };
 
-const MARKETS: ReadonlySet<string> = new Set([
-  "h2h",
-  "ah_goals",
-  "ah_corners",
-  "ou_goals",
-  "ou_corners",
-  "ou_cards",
-  "correct_score",
-]);
+const MARKETS: ReadonlySet<string> = new Set(MARKET_TYPES);
 
 function optionalInt(formData: FormData, name: string): number | null {
   const raw = String(formData.get(name) ?? "").trim();

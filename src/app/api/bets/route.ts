@@ -2,20 +2,11 @@ import { NextResponse } from "next/server";
 import { apiError, betPayload } from "@/lib/api";
 import { getUserFromRequest } from "@/lib/auth";
 import { listUserBets, placeBet } from "@/lib/bets";
-import type { MarketType } from "@/lib/types";
+import { MARKET_TYPES, type MarketType } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
-const MARKETS: ReadonlySet<string> = new Set([
-  "h2h",
-  "ah_goals",
-  "ah_corners",
-  "ou_goals",
-  "ou_corners",
-  "ou_cards",
-  "btts",
-  "correct_score",
-]);
+const MARKETS: ReadonlySet<string> = new Set(MARKET_TYPES);
 
 // GET /api/bets — the authenticated user's bets.
 export async function GET(req: Request) {

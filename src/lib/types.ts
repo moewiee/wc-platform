@@ -1,12 +1,14 @@
-export type MarketType =
-  | "h2h"
-  | "ah_goals"
-  | "ah_corners"
-  | "ou_goals"
-  | "ou_corners"
-  | "ou_cards"
-  | "btts"
-  | "correct_score";
+export const MARKET_TYPES = [
+  "h2h",
+  "ah_goals",
+  "ah_corners",
+  "ou_goals",
+  "ou_corners",
+  "ou_cards",
+  "btts",
+  "correct_score",
+] as const;
+export type MarketType = (typeof MARKET_TYPES)[number];
 
 export type MatchStatus = "scheduled" | "finished" | "void";
 export type BetStatus = "pending" | "won" | "lost" | "void" | "cancelled";
