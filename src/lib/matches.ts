@@ -5,8 +5,8 @@ import {
   fetchOddsEvents,
   fetchScores,
 } from "./odds-api";
-import { fetchEspnFinalScores } from "./espn";
-import { settleMatch } from "./bets";
+import { fetchEspnCards, fetchEspnFinalScores, type EspnFinalScore } from "./espn";
+import { completeMatchData, settleMatch } from "./bets";
 import { teamPairKey } from "./teams";
 import type { Match } from "./types";
 
@@ -171,16 +171,20 @@ export async function maybeSyncScores(force = false): Promise<SyncResult> {
     return { skipped: "Scores were synced within the last 10 minutes." };
   }
   setMeta("last_scores_sync", nowIso());
+  let espnFinals: EspnFinalScore[] | null = null;
   let finals: FinalScore[];
   try {
-    finals = apiConfigured()
-      ? await fetchOddsApiFinals()
-      : (await fetchEspnFinalScores(3)).map((s) => ({
-          home: s.home_team,
-          away: s.away_team,
-          homeScore: s.home_score,
-          awayScore: s.away_score,
-        }));
+    if (apiConfigured()) {
+      finals = await fetchOddsApiFinals();
+    } else {
+      espnFinals = await fetchEspnFinalScores(3);
+      finals = espnFinals.map((s) => ({
+        home: s.home_team,
+        away: s.away_team,
+        homeScore: s.home_score,
+        awayScore: s.away_score,
+      }));
+    }
     setMeta("last_api_error", "");
   } catch (e) {
     setMeta("last_api_error", e instanceof Error ? e.message : String(e));
@@ -207,6 +211,36 @@ export async function maybeSyncScores(force = false): Promise<SyncResult> {
       awayScore: s.awayScore,
     });
     if (!res.error) settled++;
+  }
+
+  // Completion pass: fill corners/cards on recently finished matches from
+  // ESPN box scores so ah_corners/ou_corners/ou_cards bets settle without the
+  // admin. Best-effort — anything still missing stays pending and is retried
+  // on the next sync (or entered manually).
+  const cutoff = new Date(Date.now() - 4 * 24 * 3600 * 1000).toISOString();
+  const incomplete = db
+    .prepare(
+      `SELECT id, home_team, away_team FROM matches
+       WHERE status = 'finished' AND kickoff >= ?
+         AND (corners_home IS NULL OR corners_away IS NULL OR cards_total IS NULL)`
+    )
+    .all(cutoff) as Pick<Match, "id" | "home_team" | "away_team">[];
+  if (incomplete.length > 0) {
+    try {
+      espnFinals ??= await fetchEspnFinalScores(3);
+      const espnByPair = new Map(
+        espnFinals.map((s) => [teamPairKey(s.home_team, s.away_team), s])
+      );
+      for (const m of incomplete) {
+        const s = espnByPair.get(teamPairKey(m.home_team, m.away_team));
+        if (!s) continue;
+        const cards = await fetchEspnCards(s.espn_id);
+        if (s.corners_home === null && s.corners_away === null && cards === null) continue;
+        completeMatchData(m.id, s.corners_home, s.corners_away, cards);
+      }
+    } catch (e) {
+      setMeta("last_api_error", e instanceof Error ? e.message : String(e));
+    }
   }
   return { updated: settled };
 }
