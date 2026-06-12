@@ -40,6 +40,7 @@ export interface Match {
   odds_away: number | null;
   odds_updated_at: string | null;
   odds_source: "seed" | "live";
+  oio_event_id: string | null; // odds-api.io event id (per-market odds sync)
 }
 
 export interface Bet {

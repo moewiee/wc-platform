@@ -11,14 +11,20 @@ import {
   fetchEspnOdds,
   type EspnFinalScore,
 } from "./espn";
+import { fetchOioEvents, fetchOioQuotes, oioConfigured } from "./odds-api-io";
 import { completeMatchData, settleMatch } from "./bets";
 import { teamPairKey } from "./teams";
 import type { Match } from "./types";
 
-// Rates update every 30 minutes pre-kickoff (requirement); the bet counter
-// closes at kickoff (enforced in placeBet and the UI).
-const ODDS_REFRESH_MS = 30 * 60 * 1000;
+// Rates must update at least every 30 minutes pre-kickoff (requirement); the
+// bet counter closes at kickoff (enforced in placeBet and the UI). ESPN's
+// keyless scoreboard is a single GET per refresh, so it can run every 10
+// minutes; The Odds API stays at 30 to fit the free 500-credit/month tier.
+const ODDS_REFRESH_KEYED_MS = 30 * 60 * 1000;
+const ODDS_REFRESH_KEYLESS_MS = 10 * 60 * 1000;
 const SCORES_SYNC_MS = 10 * 60 * 1000;
+const MARKET_ODDS_REFRESH_MS = 10 * 60 * 1000;
+const MARKET_ODDS_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 export function listMatches(): Match[] {
   return db.prepare("SELECT * FROM matches ORDER BY kickoff, id").all() as Match[];
@@ -47,9 +53,14 @@ type OddsQuote = {
 // configured, otherwise DraftKings prices via ESPN's keyless scoreboard.
 // Throttled so page loads don't burn quota; `force` is for the admin button.
 export async function maybeRefreshOdds(force = false): Promise<SyncResult> {
+  const refreshMs = apiConfigured()
+    ? ODDS_REFRESH_KEYED_MS
+    : ODDS_REFRESH_KEYLESS_MS;
   const last = getMeta("last_odds_refresh");
-  if (!force && last && Date.now() - Date.parse(last) < ODDS_REFRESH_MS) {
-    return { skipped: "Odds are fresh (refreshed within 30 minutes)." };
+  if (!force && last && Date.now() - Date.parse(last) < refreshMs) {
+    return {
+      skipped: `Odds are fresh (refreshed within ${refreshMs / 60000} minutes).`,
+    };
   }
   // Stamp before fetching so a failing API isn't hammered on every page load.
   setMeta("last_odds_refresh", nowIso());
@@ -152,6 +163,71 @@ export async function maybeRefreshOdds(force = false): Promise<SyncResult> {
     }
   })();
   return { updated };
+}
+
+// Real per-market quotes (AH, totals, BTTS, correct score, corners, cards)
+// from odds-api.io for matches kicking off within the next 7 days; they
+// overlay the Poisson prices in marketsForMatch. Quota: ≤40 matches means
+// at most 1 events call (only while ids are unmapped) + 4 batched odds
+// calls per refresh — ~24 requests/hour against the free tier's 100.
+export async function maybeRefreshMarketOdds(force = false): Promise<SyncResult> {
+  if (!oioConfigured()) return { skipped: "ODDS_API_IO_KEY is not configured." };
+  const last = getMeta("last_market_odds_refresh");
+  if (!force && last && Date.now() - Date.parse(last) < MARKET_ODDS_REFRESH_MS) {
+    return { skipped: "Market odds are fresh (refreshed within 10 minutes)." };
+  }
+  setMeta("last_market_odds_refresh", nowIso());
+
+  const now = Date.now();
+  const targets = listMatches()
+    .filter((m) => {
+      if (m.status !== "scheduled") return false;
+      const kickoff = Date.parse(m.kickoff);
+      return kickoff > now && kickoff - now < MARKET_ODDS_WINDOW_MS;
+    })
+    .slice(0, 40);
+  if (targets.length === 0) return { updated: 0 };
+
+  try {
+    // Map our matches to feed event ids once; ids are stable afterwards.
+    if (targets.some((m) => !m.oio_event_id)) {
+      const events = await fetchOioEvents();
+      const byPair = new Map(events.map((e) => [teamPairKey(e.home, e.away), e]));
+      const stamp = db.prepare("UPDATE matches SET oio_event_id = ? WHERE id = ?");
+      for (const m of targets) {
+        if (m.oio_event_id) continue;
+        const ev = byPair.get(teamPairKey(m.home_team, m.away_team));
+        if (ev) {
+          m.oio_event_id = String(ev.id);
+          stamp.run(m.oio_event_id, m.id);
+        }
+      }
+    }
+    const mapped = targets.filter((m) => m.oio_event_id);
+    const quotes = await fetchOioQuotes(mapped.map((m) => m.oio_event_id!));
+
+    const del = db.prepare("DELETE FROM market_odds WHERE match_id = ?");
+    const ins = db.prepare(
+      `INSERT INTO market_odds (match_id, market, line, selection, odds, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    );
+    let updated = 0;
+    const ts = nowIso();
+    db.transaction(() => {
+      for (const m of mapped) {
+        const qs = quotes.get(m.oio_event_id!);
+        if (!qs?.length) continue; // keep last quotes; staleness guard expires them
+        del.run(m.id);
+        for (const q of qs) ins.run(m.id, q.market, q.line, q.selection, q.odds, ts);
+        updated++;
+      }
+    })();
+    setMeta("last_oio_error", "");
+    return { updated };
+  } catch (e) {
+    setMeta("last_oio_error", e instanceof Error ? e.message : String(e));
+    throw e;
+  }
 }
 
 // A full-time result normalized from whichever score source we used.

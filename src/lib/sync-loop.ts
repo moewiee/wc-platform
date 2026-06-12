@@ -1,9 +1,9 @@
-import { maybeRefreshOdds, maybeSyncScores } from "./matches";
+import { maybeRefreshMarketOdds, maybeRefreshOdds, maybeSyncScores } from "./matches";
 import { maybeGenerateAiTips } from "./tips";
 
 // Background sync so odds refresh and settlement don't depend on page
-// traffic. The tick is cheap: maybeRefreshOdds/maybeSyncScores carry their
-// own throttles (30 min / 10 min) and skip when nothing is due.
+// traffic. The tick is cheap: each maybe* step carries its own throttle
+// and skips when nothing is due.
 const TICK_MS = 5 * 60 * 1000;
 
 declare global {
@@ -16,6 +16,11 @@ async function tick(): Promise<void> {
     await maybeRefreshOdds();
   } catch (e) {
     console.error("[sync] odds refresh failed:", e instanceof Error ? e.message : e);
+  }
+  try {
+    await maybeRefreshMarketOdds();
+  } catch (e) {
+    console.error("[sync] market odds refresh failed:", e instanceof Error ? e.message : e);
   }
   try {
     await maybeSyncScores();

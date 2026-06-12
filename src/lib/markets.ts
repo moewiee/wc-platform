@@ -1,9 +1,16 @@
 import type { Match, MarketType } from "./types";
+import { db } from "./db";
 
 // Derives all betting markets from a match's 1X2 odds via a Poisson goal
 // model. Markets are computed on the fly (deterministic for given odds), so
 // they move automatically whenever the anchor 1X2 odds refresh. Odds are
 // decimal x1000 integers throughout.
+//
+// When the odds-api.io sync has stored fresh bookmaker quotes for a match
+// (market_odds table), those take precedence: line markets adopt the
+// bookmaker's lines wholesale (settlement is parametric in the line), the
+// correct-score grid overlays per cell, and anything unquoted falls back to
+// the model. Settlement semantics never change with the price source.
 
 export interface MarketSelection {
   selection: string;
@@ -38,7 +45,7 @@ const MARGIN = 1.06; // bookmaker overround applied to model probabilities
 const CS_MARGIN = 1.1;
 const MAX_GOALS = 10;
 const MAX_CORNERS = 24;
-const CS_GRID = 4; // correct score grid covers 0-0 .. 4-4
+export const CS_GRID = 4; // correct score grid covers 0-0 .. 4-4
 
 // ── Poisson machinery ───────────────────────────────────────────────────────
 
@@ -238,6 +245,99 @@ function quarterLadder(base: number): number[] {
   return lines;
 }
 
+// ── Real bookmaker odds overlay ─────────────────────────────────────────────
+
+interface RealQuote {
+  market: MarketType;
+  line: number | null;
+  selection: string;
+  odds: number;
+}
+
+// If the 10-minute sync has been dead this long, fresh model prices beat
+// stale bookmaker prices.
+const REAL_FRESH_MS = 6 * 60 * 60 * 1000;
+
+function loadRealQuotes(matchId: number): Map<MarketType, RealQuote[]> {
+  const rows = db
+    .prepare(
+      "SELECT market, line, selection, odds, updated_at FROM market_odds WHERE match_id = ?"
+    )
+    .all(matchId) as (RealQuote & { updated_at: string })[];
+  const grouped = new Map<MarketType, RealQuote[]>();
+  for (const r of rows) {
+    if (Date.now() - Date.parse(r.updated_at) > REAL_FRESH_MS) continue;
+    const list = grouped.get(r.market) ?? [];
+    list.push({ market: r.market, line: r.line, selection: r.selection, odds: r.odds });
+    grouped.set(r.market, list);
+  }
+  return grouped;
+}
+
+// Single AH market on the bookmaker's most balanced line (mirrors pickAhLine).
+function realAhMarket(
+  rows: RealQuote[] | undefined,
+  market: MarketType,
+  title: string,
+  match: Match
+): MatchMarket | null {
+  if (!rows?.length) return null;
+  const byLine = new Map<number, { home?: number; away?: number }>();
+  for (const r of rows) {
+    if (r.line === null) continue;
+    const e = byLine.get(r.line) ?? {};
+    if (r.selection === "home" || r.selection === "away") e[r.selection] = r.odds;
+    byLine.set(r.line, e);
+  }
+  let best: { line: number; home: number; away: number } | null = null;
+  for (const [line, e] of byLine) {
+    if (!e.home || !e.away) continue;
+    if (!best || Math.abs(e.home - e.away) < Math.abs(best.home - best.away)) {
+      best = { line, home: e.home, away: e.away };
+    }
+  }
+  if (!best) return null;
+  return {
+    market,
+    name: `${title} ${fmtLine(best.line)}`,
+    line: best.line,
+    selections: [
+      { selection: "home", label: `${match.home_team} ${fmtLine(best.line)}`, odds: best.home },
+      { selection: "away", label: `${match.away_team} ${fmtLine(-best.line)}`, odds: best.away },
+    ],
+  };
+}
+
+// O/U ladder straight from the bookmaker's quoted lines, sorted ascending.
+function realTotalsMarkets(
+  rows: RealQuote[] | undefined,
+  market: MarketType,
+  title: string
+): MatchMarket[] {
+  if (!rows?.length) return [];
+  const byLine = new Map<number, { over?: number; under?: number }>();
+  for (const r of rows) {
+    if (r.line === null) continue;
+    const e = byLine.get(r.line) ?? {};
+    if (r.selection === "over" || r.selection === "under") e[r.selection] = r.odds;
+    byLine.set(r.line, e);
+  }
+  return [...byLine.entries()]
+    .filter((entry): entry is [number, { over: number; under: number }] =>
+      Boolean(entry[1].over && entry[1].under)
+    )
+    .sort(([a], [b]) => a - b)
+    .map(([line, e]) => ({
+      market,
+      name: `${title} ${line}`,
+      line,
+      selections: [
+        { selection: "over", label: `Over ${line}`, odds: e.over },
+        { selection: "under", label: `Under ${line}`, odds: e.under },
+      ],
+    }));
+}
+
 export function marketsForMatch(match: Match): MatchMarket[] {
   const markets: MatchMarket[] = [];
 
@@ -255,59 +355,87 @@ export function marketsForMatch(match: Match): MatchMarket[] {
     });
   }
 
+  const real = loadRealQuotes(match.id);
+
   const model = modelForMatch(match);
   if (!model) return markets;
   const { lh, la } = model;
 
   const goals = scoreMatrix(lh, la, MAX_GOALS);
 
-  // Asian handicap (goals) — auto-balanced line in quarter steps.
+  // Asian handicap (goals) — bookmaker line, else auto-balanced quarter line.
   {
-    const candidates: number[] = [];
-    for (let l = -3; l <= 3.0001; l += 0.25) candidates.push(Math.round(l * 4) / 4);
-    const line = pickAhLine(goals, candidates);
-    const oh = ahFairOdds(goals, line, "home");
-    const oa = ahFairOdds(goals, -line, "away");
-    if (oh && oa) {
-      markets.push({
-        market: "ah_goals",
-        name: `Asian Handicap ${fmtLine(line)}`,
-        line,
-        selections: [
-          { selection: "home", label: `${match.home_team} ${fmtLine(line)}`, odds: oh },
-          { selection: "away", label: `${match.away_team} ${fmtLine(-line)}`, odds: oa },
-        ],
-      });
+    const m = realAhMarket(real.get("ah_goals"), "ah_goals", "Asian Handicap", match);
+    if (m) {
+      markets.push(m);
+    } else {
+      const candidates: number[] = [];
+      for (let l = -3; l <= 3.0001; l += 0.25) candidates.push(Math.round(l * 4) / 4);
+      const line = pickAhLine(goals, candidates);
+      const oh = ahFairOdds(goals, line, "home");
+      const oa = ahFairOdds(goals, -line, "away");
+      if (oh && oa) {
+        markets.push({
+          market: "ah_goals",
+          name: `Asian Handicap ${fmtLine(line)}`,
+          line,
+          selections: [
+            { selection: "home", label: `${match.home_team} ${fmtLine(line)}`, odds: oh },
+            { selection: "away", label: `${match.away_team} ${fmtLine(-line)}`, odds: oa },
+          ],
+        });
+      }
     }
   }
 
   // Both teams to score.
   {
-    let both = 0;
-    for (let i = 1; i <= MAX_GOALS; i++) {
-      for (let j = 1; j <= MAX_GOALS; j++) both += goals[i][j];
-    }
-    const no = Math.max(0, 1 - both);
-    if (both >= 0.02 && no >= 0.02) {
+    const rows = real.get("btts");
+    const yes = rows?.find((r) => r.selection === "yes")?.odds;
+    const no = rows?.find((r) => r.selection === "no")?.odds;
+    if (yes && no) {
       markets.push({
         market: "btts",
         name: "Both Teams To Score",
         line: null,
         selections: [
-          { selection: "yes", label: "Yes", odds: probsToOdds(both) },
-          { selection: "no", label: "No", odds: probsToOdds(no) },
+          { selection: "yes", label: "Yes", odds: yes },
+          { selection: "no", label: "No", odds: no },
         ],
       });
+    } else {
+      let both = 0;
+      for (let i = 1; i <= MAX_GOALS; i++) {
+        for (let j = 1; j <= MAX_GOALS; j++) both += goals[i][j];
+      }
+      const noProb = Math.max(0, 1 - both);
+      if (both >= 0.02 && noProb >= 0.02) {
+        markets.push({
+          market: "btts",
+          name: "Both Teams To Score",
+          line: null,
+          selections: [
+            { selection: "yes", label: "Yes", odds: probsToOdds(both) },
+            { selection: "no", label: "No", odds: probsToOdds(noProb) },
+          ],
+        });
+      }
     }
   }
 
-  // Goals over/under — quarter-step ladder around the expected total.
+  // Goals over/under — bookmaker ladder, else quarter steps around the
+  // expected total.
   {
-    const totalDist = poissonRow(lh + la, MAX_GOALS * 2);
-    const base = Math.max(1.5, Math.round(lh + la - 0.5) + 0.5);
-    for (const line of quarterLadder(base)) {
-      const m = totalsMarket("ou_goals", "Goals Over/Under", totalDist, line);
-      if (m) markets.push(m);
+    const realLadder = realTotalsMarkets(real.get("ou_goals"), "ou_goals", "Goals Over/Under");
+    if (realLadder.length) {
+      markets.push(...realLadder);
+    } else {
+      const totalDist = poissonRow(lh + la, MAX_GOALS * 2);
+      const base = Math.max(1.5, Math.round(lh + la - 0.5) + 0.5);
+      for (const line of quarterLadder(base)) {
+        const m = totalsMarket("ou_goals", "Goals Over/Under", totalDist, line);
+        if (m) markets.push(m);
+      }
     }
   }
 
@@ -316,48 +444,69 @@ export function marketsForMatch(match: Match): MatchMarket[] {
   const share = Math.min(0.68, Math.max(0.32, 0.5 + (lh - la) * 0.07));
   const corners = scoreMatrix(cornersTotal * share, cornersTotal * (1 - share), MAX_CORNERS);
 
-  // Asian handicap (corners) — quarter steps, like the goals handicap.
+  // Asian handicap (corners) — bookmaker line, else quarter steps.
   {
-    const candidates: number[] = [];
-    for (let l = -6; l <= 6.0001; l += 0.25) candidates.push(Math.round(l * 4) / 4);
-    const line = pickAhLine(corners, candidates);
-    const oh = ahFairOdds(corners, line, "home");
-    const oa = ahFairOdds(corners, -line, "away");
-    if (oh && oa) {
-      markets.push({
-        market: "ah_corners",
-        name: `Corners Handicap ${fmtLine(line)}`,
-        line,
-        selections: [
-          { selection: "home", label: `${match.home_team} ${fmtLine(line)}`, odds: oh },
-          { selection: "away", label: `${match.away_team} ${fmtLine(-line)}`, odds: oa },
-        ],
-      });
+    const m = realAhMarket(real.get("ah_corners"), "ah_corners", "Corners Handicap", match);
+    if (m) {
+      markets.push(m);
+    } else {
+      const candidates: number[] = [];
+      for (let l = -6; l <= 6.0001; l += 0.25) candidates.push(Math.round(l * 4) / 4);
+      const line = pickAhLine(corners, candidates);
+      const oh = ahFairOdds(corners, line, "home");
+      const oa = ahFairOdds(corners, -line, "away");
+      if (oh && oa) {
+        markets.push({
+          market: "ah_corners",
+          name: `Corners Handicap ${fmtLine(line)}`,
+          line,
+          selections: [
+            { selection: "home", label: `${match.home_team} ${fmtLine(line)}`, odds: oh },
+            { selection: "away", label: `${match.away_team} ${fmtLine(-line)}`, odds: oa },
+          ],
+        });
+      }
     }
   }
 
-  // Corners over/under — quarter-step ladder.
+  // Corners over/under — bookmaker ladder, else quarter steps.
   {
-    const dist = poissonRow(cornersTotal, MAX_CORNERS * 2);
-    const base = Math.round(cornersTotal - 0.5) + 0.5;
-    for (const line of quarterLadder(base)) {
-      const m = totalsMarket("ou_corners", "Corners Over/Under", dist, line);
-      if (m) markets.push(m);
+    const realLadder = realTotalsMarkets(real.get("ou_corners"), "ou_corners", "Corners Over/Under");
+    if (realLadder.length) {
+      markets.push(...realLadder);
+    } else {
+      const dist = poissonRow(cornersTotal, MAX_CORNERS * 2);
+      const base = Math.round(cornersTotal - 0.5) + 0.5;
+      for (const line of quarterLadder(base)) {
+        const m = totalsMarket("ou_corners", "Corners Over/Under", dist, line);
+        if (m) markets.push(m);
+      }
     }
   }
 
-  // Cards over/under (yellow = 1, red = 2; flat expectation).
+  // Cards over/under (yellow = 1, red = 2; flat expectation when no quotes).
   {
-    const cardsTotal = 4.2;
-    const dist = poissonRow(cardsTotal, 20);
-    for (const line of [3.5, 4.5, 5.5]) {
-      const m = totalsMarket("ou_cards", "Cards Over/Under", dist, line);
-      if (m) markets.push(m);
+    const realLadder = realTotalsMarkets(real.get("ou_cards"), "ou_cards", "Cards Over/Under");
+    if (realLadder.length) {
+      markets.push(...realLadder);
+    } else {
+      const cardsTotal = 4.2;
+      const dist = poissonRow(cardsTotal, 20);
+      for (const line of [3.5, 4.5, 5.5]) {
+        const m = totalsMarket("ou_cards", "Cards Over/Under", dist, line);
+        if (m) markets.push(m);
+      }
     }
   }
 
-  // Correct score: 0-0 .. 4-4 grid plus "any other" buckets.
+  // Correct score: 0-0 .. 4-4 grid plus "any other" buckets. Bookmaker odds
+  // overlay per cell; the buckets stay model-priced (a bookmaker's "any
+  // other" covers a different score set than our grid, so its price would
+  // settle wrong here).
   {
+    const csReal = new Map(
+      (real.get("correct_score") ?? []).map((r) => [r.selection, r.odds])
+    );
     const selections: MarketSelection[] = [];
     let otherHome = 0;
     let otherDraw = 0;
@@ -376,7 +525,7 @@ export function marketsForMatch(match: Match): MatchMarket[] {
         selections.push({
           selection: `${i}-${j}`,
           label: `${i} - ${j}`,
-          odds: probsToOdds(goals[i][j], CS_MARGIN),
+          odds: csReal.get(`${i}-${j}`) ?? probsToOdds(goals[i][j], CS_MARGIN),
         });
       }
     }

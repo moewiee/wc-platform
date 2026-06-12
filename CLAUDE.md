@@ -49,9 +49,10 @@ All domain logic lives in `src/lib/`; pages and API routes are thin.
 | --- | --- |
 | `db.ts` | Schema + singleton connection (global, survives HMR). Seeding is versioned: bump `SEED_VERSION` in `seed.ts` after editing seed data. Init retries on `SQLITE_BUSY` because parallel `next build` workers all open the DB. |
 | `money.ts` | **Invariants**: balances/stakes/payouts are integer points; odds are decimal ×1000 integers; payout = `floor(stake·odds/1000)`. AH half-win = `floor(stake·(1000+odds)/2000)`, half-loss refund = `floor(stake/2)`. |
-| `markets.ts` | All non-1X2 markets are **derived on the fly** from the stored 1X2 odds via a Poisson model (memoized fit) — never stored. `marketsForMatch()` quotes, `findSelection()` prices one selection, `settleSelection()` returns win/lose/push/half_win/half_lose/**pending** (pending = corners/cards data missing). |
+| `markets.ts` | Non-1X2 markets are derived from the stored 1X2 odds via a Poisson model (memoized fit). When `ODDS_API_IO_KEY` is set, real Bet365 quotes from the `market_odds` table **overlay** the model in `marketsForMatch()`: line markets (AH/totals) adopt the bookmaker's lines wholesale, correct-score overlays per cell ("any other" buckets stay model-priced — different score set), quotes older than 6 h are ignored and anything unquoted falls back to the model. Settlement semantics never depend on the price source. `findSelection()` prices one selection, `settleSelection()` returns win/lose/push/half_win/half_lose/**pending** (pending = corners/cards data missing). |
+| `odds-api-io.ts` | odds-api.io v3 client (per-market bookmaker odds; free tier 100 req/h, key in `ODDS_API_IO_KEY`). League slug `international-fifa-world-cup`, single bookmaker `Bet365`, `/odds/multi` batches 10 events per request. Feed market names map to our families (`Bookings Totals` → `ou_cards`, lines > 15 skipped as booking points; correct-score labels like `"2-1"` match our selection keys). Domain errors arrive as HTTP 200 `{error}` bodies. `maybeRefreshMarketOdds` (matches.ts, 10-min throttle, next-7-days window, ≤40 matches) maps matches by `teamPairKey` → `matches.oio_event_id`, then rewrites `market_odds` per match. |
 | `bets.ts` | `placeBet` (re-prices server-side — never trust client odds), `cancelBet` (before kickoff only), `settleMatch` (score required; corners/cards optional — bets needing them stay pending), `completeMatchData`, `voidMatch`. Every balance change goes through `applyBalanceChange` inside a `db.transaction` and writes a ledger row. |
-| `matches.ts` | Odds + score sync. Odds refresh throttled to 30 min, scores to 10 min (throttle stamps in `meta` table). Both odds and scores come from The Odds API when `ODDS_API_KEY` is set, otherwise from ESPN (keyless; odds are DraftKings moneylines, `api_id` prefixed `espn:`) — either way odds auto-refresh and finished matches auto-settle, then a best-effort completion pass fills corners/cards from ESPN box scores so those bets settle too. Upsert matches by `api_id`, falling back to normalized team-pair — only against `scheduled` rows; voided rows release their `api_id` so rescheduled fixtures reappear. |
+| `matches.ts` | Odds + score sync. Odds refresh throttled to 10 min on the keyless ESPN path (one GET per refresh) or 30 min when `ODDS_API_KEY` is set (free tier is 500 credits/mo); scores to 10 min (throttle stamps in `meta` table). Both odds and scores come from The Odds API when `ODDS_API_KEY` is set, otherwise from ESPN (keyless; odds are DraftKings moneylines, `api_id` prefixed `espn:`) — either way odds auto-refresh and finished matches auto-settle, then a best-effort completion pass fills corners/cards from ESPN box scores so those bets settle too. Upsert matches by `api_id`, falling back to normalized team-pair — only against `scheduled` rows; voided rows release their `api_id` so rescheduled fixtures reappear. |
 | `odds-api.ts` | The Odds API v4 client. Sport key `soccer_fifa_world_cup`; soccer h2h outcomes are named home_team / away_team / `"Draw"`; scores come back as **numeric strings**. Free tier 500 credits/mo — keep calls throttled. |
 | `espn.ts` | Keyless ESPN source: the public scoreboard JSON (`site.api.espn.com/.../soccer/fifa.world/scoreboard?dates=YYYYMMDD-YYYYMMDD`) gives finals + corners (`wonCorners`), live in-play scores with clock, and 1X2 odds (DraftKings moneylines, American format → decimal ×1000); `fetchEspnCards` reads total cards (yellow = 1, red = 2) from the per-match `summary` box score. ESPN team names match the seeds via `normTeam` — verified for all 72 group fixtures. |
 | `live.ts` | In-play scores for the lobby: maps ESPN live events (`fetchEspnLiveScores`, includes clock) to unsettled started matches, cached in-process for 60 s. Served by `/api/live`; `OddsBoard` polls it every minute and shows score + clock on LIVE rows. |
@@ -82,10 +83,13 @@ mismatches — keep that pattern.
   "Türkiye"/"Turkey") — always compare via `normTeam`/`teamPairKey`
   (`teams.ts`), and add new aliases there.
 
-## Environment (`.env.local`)
+## Environment (`.env`, git-ignored)
 
-`ODDS_API_KEY` (bookmaker-median odds + preferred score source, optional),
-`ODDS_API_SPORT_KEY`, `ODDS_API_REGIONS`, `OPENAI_API_KEY` (AI tips, optional),
-`OPENAI_MODEL` (default `gpt-5-mini`). Everything degrades gracefully when
-keys are absent: ESPN/DraftKings odds, ESPN-based auto-settlement and live
-scores, model-only tips.
+`ODDS_API_KEY` (The Odds API: bookmaker-median 1X2 + preferred score source,
+optional), `ODDS_API_SPORT_KEY`, `ODDS_API_REGIONS`, `ODDS_API_IO_KEY`
+(odds-api.io: real per-market Bet365 odds overlaying the Poisson model,
+optional — a **different service** than The Odds API; never put its key in
+`ODDS_API_KEY`), `OPENAI_API_KEY` (AI tips, optional), `OPENAI_MODEL`
+(default `gpt-5-mini`). Everything degrades gracefully when keys are absent:
+ESPN/DraftKings odds, ESPN-based auto-settlement and live scores, model-only
+tips and market prices.

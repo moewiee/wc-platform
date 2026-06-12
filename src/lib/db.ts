@@ -91,13 +91,27 @@ function migrate(db: Database.Database) {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS market_odds (
+      match_id INTEGER NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
+      market TEXT NOT NULL,
+      line REAL,
+      selection TEXT NOT NULL,
+      odds INTEGER NOT NULL,
+      updated_at TEXT NOT NULL
+    );
     CREATE INDEX IF NOT EXISTS idx_bets_user ON bets(user_id);
     CREATE INDEX IF NOT EXISTS idx_bets_match ON bets(match_id);
     CREATE INDEX IF NOT EXISTS idx_txns_user ON transactions(user_id);
     CREATE INDEX IF NOT EXISTS idx_matches_kickoff ON matches(kickoff);
     CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
     CREATE INDEX IF NOT EXISTS idx_tips_match ON tips(match_id);
+    CREATE INDEX IF NOT EXISTS idx_market_odds_match ON market_odds(match_id);
   `);
+  // Added after launch: odds-api.io event id for the per-market odds sync.
+  const matchCols = db.prepare("PRAGMA table_info(matches)").all() as { name: string }[];
+  if (!matchCols.some((c) => c.name === "oio_event_id")) {
+    db.exec("ALTER TABLE matches ADD COLUMN oio_event_id TEXT");
+  }
 }
 
 // Insert seeded fixtures that aren't in the DB yet; refresh odds/details on

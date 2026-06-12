@@ -17,7 +17,7 @@ import {
   settleMatch,
   voidMatch,
 } from "./bets";
-import { maybeRefreshOdds, maybeSyncScores } from "./matches";
+import { maybeRefreshMarketOdds, maybeRefreshOdds, maybeSyncScores } from "./matches";
 import { fmtOdds, fmtPts, parseStakeToPoints } from "./money";
 import { generateAiTipsForUpcoming } from "./tips";
 import type { MarketType } from "./types";
@@ -138,10 +138,16 @@ export async function adminRefreshOddsAction(
   if (denied) return denied;
   try {
     const res = await maybeRefreshOdds(true);
+    // Per-market bookmaker odds ride along; a failure here shouldn't mask a
+    // successful 1X2 refresh (its error lands in the last_oio_error meta).
+    const marketRes = await maybeRefreshMarketOdds(true).catch(() => null);
     revalidatePath("/", "layout");
-    return "skipped" in res
-      ? { error: res.skipped }
-      : { success: `Odds refreshed — ${res.updated} matches updated from the API.` };
+    if ("skipped" in res) return { error: res.skipped };
+    const markets =
+      marketRes && "updated" in marketRes
+        ? `, market odds for ${marketRes.updated}`
+        : "";
+    return { success: `Odds refreshed — ${res.updated} matches updated from the API${markets}.` };
   } catch (e) {
     return { error: `Odds refresh failed: ${e instanceof Error ? e.message : e}` };
   }
