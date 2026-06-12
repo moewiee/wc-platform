@@ -1,4 +1,5 @@
 import { notFound } from "next/navigation";
+import LiveScore from "@/components/LiveScore";
 import LocalTime from "@/components/LocalTime";
 import MarketBoard from "@/components/MarketBoard";
 import TipsPanel from "@/components/TipsPanel";
@@ -51,6 +52,9 @@ export default async function MatchPage({
           {match.home_team} <span className="text-[#f0b429]">vs</span>{" "}
           {match.away_team}
         </h1>
+        {match.status === "scheduled" && (
+          <LiveScore matchId={match.id} kickoff={match.kickoff} />
+        )}
         {match.status === "finished" && (
           <div className="mt-3">
             <div className="font-mono text-3xl font-bold text-[#f0b429]">
