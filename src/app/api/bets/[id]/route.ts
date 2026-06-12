@@ -18,7 +18,8 @@ export async function GET(
   return NextResponse.json({ bet: betPayload(bet) });
 }
 
-// DELETE /api/bets/:id — cancel an open bet before kickoff (stake refunded).
+// DELETE /api/bets/:id — cancel an open bet (stake refunded). Allowed only
+// within 30 minutes of placement and before kickoff.
 export async function DELETE(
   req: Request,
   { params }: { params: Promise<{ id: string }> }

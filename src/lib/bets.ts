@@ -16,6 +16,10 @@ import type { Bet, BetWithMatch, MarketType, Match, OpenBetRow, Pick3 } from "./
 
 class BetError extends Error {}
 
+// Players can only cancel a bet within this window after placing it (and
+// never once the match has kicked off).
+export const CANCEL_WINDOW_MS = 30 * 60 * 1000;
+
 function getBet(id: number): Bet | undefined {
   return db.prepare("SELECT * FROM bets WHERE id = ?").get(id) as
     | Bet
@@ -121,6 +125,11 @@ export function cancelBet(userId: number, betId: number): { error?: string } {
         .get(bet.match_id) as Match;
       if (match.status !== "scheduled" || Date.parse(match.kickoff) <= Date.now()) {
         throw new BetError("Too late to cancel — the match has started.");
+      }
+      if (Date.parse(bet.created_at) + CANCEL_WINDOW_MS <= Date.now()) {
+        throw new BetError(
+          "Too late to cancel — bets can only be cancelled within 30 minutes of placing them."
+        );
       }
       db.prepare(
         "UPDATE bets SET status = 'cancelled', payout_points = ?, settled_at = ? WHERE id = ?"

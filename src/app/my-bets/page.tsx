@@ -2,7 +2,7 @@ import Link from "next/link";
 import CancelBetButton from "@/components/CancelBetButton";
 import LocalTime from "@/components/LocalTime";
 import { requireUser } from "@/lib/auth";
-import { listUserBets } from "@/lib/bets";
+import { CANCEL_WINDOW_MS, listUserBets } from "@/lib/bets";
 import { fmtOdds, fmtPts } from "@/lib/money";
 import { maybeSyncScores } from "@/lib/matches";
 import type { BetStatus, BetWithMatch } from "@/lib/types";
@@ -21,7 +21,8 @@ function BetCard({ bet, now }: { bet: BetWithMatch; now: number }) {
   const cancellable =
     bet.status === "pending" &&
     bet.match_status === "scheduled" &&
-    Date.parse(bet.kickoff) > now;
+    Date.parse(bet.kickoff) > now &&
+    Date.parse(bet.created_at) + CANCEL_WINDOW_MS > now;
   // payout_points is the actual credit; net = payout - stake for settled bets.
   const net =
     bet.payout_points !== null ? bet.payout_points - bet.stake_points : null;

@@ -52,6 +52,7 @@ function BetSlipPanel({
     {}
   );
   const [closedFor, setClosedFor] = useState(false);
+  const [confirming, setConfirming] = useState(false);
 
   useEffect(() => {
     if (!slip) return;
@@ -60,6 +61,13 @@ function BetSlipPanel({
     const t = setInterval(update, 30_000);
     return () => clearInterval(t);
   }, [slip]);
+
+  // Drop out of the confirmation step when the selection changes or the
+  // action comes back with a result.
+  useEffect(() => setConfirming(false), [slip]);
+  useEffect(() => {
+    if (state.error || state.success) setConfirming(false);
+  }, [state]);
 
   if (!slip) return null;
 
@@ -170,12 +178,67 @@ function BetSlipPanel({
                 </p>
               )}
               <button
-                type="submit"
-                disabled={pending || closedFor}
+                type="button"
+                onClick={() => setConfirming(true)}
+                disabled={pending || closedFor || stakePts === null}
                 className="w-full rounded-md bg-[#f0b429] py-2 text-sm font-bold uppercase tracking-wide text-[#081120] transition hover:bg-[#ffd166] disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
               >
                 {pending ? "Placing…" : "Place Bet"}
               </button>
+              {confirming && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+                  <div className="w-full max-w-sm rounded-xl border border-[#f0b429]/40 bg-[#0e1c33] p-5 shadow-2xl shadow-black/60">
+                    <h3 className="text-sm font-bold uppercase tracking-wide text-[#f0b429]">
+                      Confirm your bet
+                    </h3>
+                    <div className="mt-3 space-y-1.5 text-sm">
+                      <p className="text-slate-400">{slip.matchLabel}</p>
+                      <p className="font-semibold text-slate-100">
+                        {slip.marketName} · {slip.selectionLabel}{" "}
+                        <span className="font-mono text-[#f0b429]">
+                          @ {fmtOdds(slip.odds)}
+                        </span>
+                      </p>
+                      <p className="text-slate-300">
+                        Stake:{" "}
+                        <span className="font-mono font-bold">
+                          {fmtPts(stakePts ?? 0)} pts
+                        </span>
+                      </p>
+                      {projected !== null && (
+                        <p className="text-slate-300">
+                          Potential payout:{" "}
+                          <span className="font-mono font-bold text-emerald-400">
+                            {fmtPts(projected)} pts
+                          </span>
+                        </p>
+                      )}
+                    </div>
+                    <p className="mt-3 text-xs text-slate-400">
+                      Are you sure you want to place this bet? You can only
+                      cancel it within 30 minutes of placing it, and never
+                      after kickoff.
+                    </p>
+                    <div className="mt-4 flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setConfirming(false)}
+                        disabled={pending}
+                        className="flex-1 rounded-md border border-slate-600 py-2 text-sm font-semibold text-slate-300 transition hover:border-slate-400 disabled:opacity-50"
+                      >
+                        Go back
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={pending}
+                        className="flex-1 rounded-md bg-[#f0b429] py-2 text-sm font-bold uppercase tracking-wide text-[#081120] transition hover:bg-[#ffd166] disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+                      >
+                        {pending ? "Placing…" : "Yes, place bet"}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
             </>
           )}
         </form>

@@ -82,7 +82,7 @@ curl -s -X POST ${BASE}/api/bets \\
 # 4. my bets + balance
 curl -s ${BASE}/api/bets -H "Authorization: Bearer $tok" | jq .
 
-# 5. changed your mind? cancel before kickoff for a full refund
+# 5. changed your mind? cancel within 30 min of placing (and before kickoff)
 curl -s -X DELETE ${BASE}/api/bets/7 -H "Authorization: Bearer $tok"`}</Code>
       </section>
 
@@ -139,8 +139,8 @@ curl -s -X DELETE ${BASE}/api/bets/7 -H "Authorization: Bearer $tok"`}</Code>
           Your balance and all your bets, newest first.
         </Endpoint>
         <Endpoint method="DELETE" path="/api/bets/{id}" auth>
-          Cancel one of your open bets and refund the stake. Only works before
-          the match kicks off.
+          Cancel one of your open bets and refund the stake. Only works within
+          30 minutes of placing the bet, and never after kickoff.
         </Endpoint>
       </section>
 
@@ -217,7 +217,8 @@ curl -s -X DELETE ${BASE}/api/bets/7 -H "Authorization: Bearer $tok"`}</Code>
           </li>
           <li>
             The counter closes at kickoff — no bets or cancellations after that,
-            and odds disappear from match payloads.
+            and odds disappear from match payloads. Cancellations also close 30
+            minutes after the bet is placed.
           </li>
           <li>
             Asian quarter lines split your stake across the two adjacent lines
