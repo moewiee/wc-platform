@@ -1,4 +1,4 @@
-import { db, nowIso } from "./db";
+import { db, getMeta, nowIso, setMeta } from "./db";
 import { findSelection, marketsForMatch, modelForMatch } from "./markets";
 import { fmtOdds } from "./money";
 import type { MarketType, Match, Tip } from "./types";
@@ -192,18 +192,33 @@ async function callOpenAi(prompt: string, useWebSearch: boolean): Promise<string
   return text;
 }
 
+// Three agents with deliberately different characters: Eddie chases dressing-
+// room news, Anna reads form and tactics, Vic only cares whether the price is
+// wrong. Each gets at most one tip per match.
 const AI_EXPERTS = [
   {
     name: "Eddie Insider",
     avatar: "🕵️",
     angle:
-      "team news, injuries, suspensions and likely line-ups reported in the last few days",
+      "team news, injuries, suspensions, rotation and likely line-ups reported in the last few days",
+    style:
+      "You trust dressing-room whispers over statistics. If the news gives you no edge, pick the market the missing/returning players affect most.",
   },
   {
     name: "Anna Analyst",
     avatar: "📊",
     angle:
-      "recent form, tactical match-ups and what pundits and statistical previews are saying",
+      "recent form, tactical match-ups, set-piece threat and what statistical previews and pundits are saying",
+    style:
+      "You are methodical and slightly contrarian to hype. You prefer handicaps and totals (goals or corners) where the tactical picture is clear.",
+  },
+  {
+    name: "Vic Value",
+    avatar: "💰",
+    angle:
+      "the betting market itself: where the quoted odds look wrong versus realistic probabilities, overreactions to news, and public-money bias on big names",
+    style:
+      "You never bet the obvious favourite at a short price. Compare the quoted odds with what you think the true chances are and take the biggest gap, even on an unfashionable selection.",
   },
 ];
 
@@ -241,12 +256,13 @@ export async function generateAiTipsForMatch(
     if (already.n > 0) continue;
 
     const prompt = `You are "${expert.name}", a football betting expert focused on ${expert.angle}.
+${expert.style}
 Match: ${match.home_team} vs ${match.away_team}, FIFA World Cup 2026${match.group_name ? `, Group ${match.group_name}` : ""}, kickoff ${match.kickoff}${match.venue ? `, in ${match.venue}` : ""}.
-Search the web for the latest news about both teams, then pick exactly ONE bet from this menu of available markets:
+Search the web for the latest news about both teams, weigh it from your angle, then pick exactly ONE bet from this menu of available markets:
 ${marketMenu(match)}
 
 Respond with ONLY a JSON object, no other text:
-{"market": "<market>", "line": <line number or null>, "selection": "<selection>", "confidence": <1-5>, "rationale": "<2-3 sentences citing the concrete news/facts behind the pick>"}`;
+{"market": "<market>", "line": <line number or null>, "selection": "<selection>", "confidence": <1-5>, "rationale": "<2-3 sentences in your persona's voice citing the concrete news/facts behind the pick>"}`;
 
     try {
       let text: string;
@@ -291,26 +307,47 @@ Respond with ONLY a JSON object, no other text:
   return { created };
 }
 
-// Generate AI tips for the next few upcoming matches that lack them.
+// Generate AI tips for every match kicking off within the window that any of
+// the agents hasn't covered yet. Keeps going past per-match errors so one bad
+// response doesn't starve the rest; the last error is reported.
 export async function generateAiTipsForUpcoming(
-  maxMatches = 3
+  windowHours = 24
 ): Promise<{ created: number; matches: number; error?: string }> {
   if (!openAiConfigured()) {
-    return { created: 0, matches: 0, error: "OPENAI_API_KEY not set in .env.local." };
+    return { created: 0, matches: 0, error: "OPENAI_API_KEY not set in .env." };
   }
+  const until = new Date(Date.now() + windowHours * 3600 * 1000).toISOString();
   const upcoming = db
     .prepare(
       `SELECT m.* FROM matches m
-       WHERE m.status = 'scheduled' AND m.kickoff > ?
-         AND (SELECT COUNT(*) FROM tips t WHERE t.match_id = m.id AND t.source = 'openai') = 0
-       ORDER BY m.kickoff LIMIT ?`
+       WHERE m.status = 'scheduled' AND m.kickoff > ? AND m.kickoff <= ?
+         AND (SELECT COUNT(DISTINCT t.expert) FROM tips t
+              WHERE t.match_id = m.id AND t.source = 'openai') < ?
+       ORDER BY m.kickoff`
     )
-    .all(nowIso(), maxMatches) as Match[];
+    .all(nowIso(), until, AI_EXPERTS.length) as Match[];
   let created = 0;
+  let error: string | undefined;
   for (const match of upcoming) {
     const res = await generateAiTipsForMatch(match);
     created += res.created;
-    if (res.error) return { created, matches: upcoming.length, error: res.error };
+    if (res.error) error = res.error;
   }
-  return { created, matches: upcoming.length };
+  return { created, matches: upcoming.length, error };
+}
+
+// 12-hourly scheduler entry point (called from the background sync loop):
+// gather news on everything kicking off in the next 24 h and publish tips.
+const AI_TIPS_INTERVAL_MS = 12 * 60 * 60 * 1000;
+
+export async function maybeGenerateAiTips(
+  force = false
+): Promise<{ skipped: string } | { created: number; matches: number; error?: string }> {
+  if (!openAiConfigured()) return { skipped: "No OPENAI_API_KEY configured." };
+  const last = getMeta("last_ai_tips_run");
+  if (!force && last && Date.now() - Date.parse(last) < AI_TIPS_INTERVAL_MS) {
+    return { skipped: "AI tips ran within the last 12 hours." };
+  }
+  setMeta("last_ai_tips_run", nowIso());
+  return generateAiTipsForUpcoming(24);
 }

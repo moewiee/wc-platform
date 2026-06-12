@@ -1,4 +1,5 @@
 import { maybeRefreshOdds, maybeSyncScores } from "./matches";
+import { maybeGenerateAiTips } from "./tips";
 
 // Background sync so odds refresh and settlement don't depend on page
 // traffic. The tick is cheap: maybeRefreshOdds/maybeSyncScores carry their
@@ -20,6 +21,17 @@ async function tick(): Promise<void> {
     await maybeSyncScores();
   } catch (e) {
     console.error("[sync] score sync failed:", e instanceof Error ? e.message : e);
+  }
+  try {
+    const res = await maybeGenerateAiTips();
+    if ("created" in res) {
+      console.log(
+        `[sync] ai tips: ${res.created} tips across ${res.matches} matches` +
+          (res.error ? ` (last error: ${res.error})` : "")
+      );
+    }
+  } catch (e) {
+    console.error("[sync] ai tips failed:", e instanceof Error ? e.message : e);
   }
 }
 

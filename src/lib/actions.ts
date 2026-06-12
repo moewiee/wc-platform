@@ -223,7 +223,7 @@ export async function adminGenerateTipsAction(
 ): Promise<FormState> {
   const denied = await requireAdminForAction();
   if (denied) return denied;
-  const res = await generateAiTipsForUpcoming(3);
+  const res = await generateAiTipsForUpcoming();
   revalidatePath("/", "layout");
   if (res.error) {
     return {
@@ -231,7 +231,7 @@ export async function adminGenerateTipsAction(
     };
   }
   if (res.matches === 0) {
-    return { success: "All upcoming matches already have AI tips." };
+    return { success: "All matches in the next 24 h already have AI tips." };
   }
   return { success: `Generated ${res.created} AI tips across ${res.matches} matches.` };
 }
