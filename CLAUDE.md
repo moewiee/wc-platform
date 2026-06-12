@@ -6,21 +6,40 @@ better-sqlite3 + Tailwind 4). Product requirements live in
 
 ## Commands
 
-```powershell
+```bash
 npm run dev      # development server
 npm run build    # typecheck + production build (this is the lint/typecheck gate)
 npm start        # production server; add `-- -H 0.0.0.0` for LAN access
 ```
 
-- Node is a **portable install** at
-  `%LOCALAPPDATA%\Programs\node-v24.16.0-win-x64`. Fresh non-interactive
-  shells may not have it on PATH — prefix commands with
-  `$env:Path = "$env:Path;$env:LOCALAPPDATA\Programs\node-v24.16.0-win-x64"`.
+- Host: Debian 12, Node 24 system-wide via NodeSource (`/usr/bin/node`).
 - There are no unit tests; verify with `npm run build` plus hitting the REST
   API (`/api/auth/register`, `/api/matches`, `/api/bets`) against a running
   server.
 - **Reset DB**: stop the server, delete `data/`. It re-creates and re-seeds on
   next start. Always reset before handing over (test accounts/bets persist).
+
+## Production deployment
+
+The site runs as systemd services and is published at
+**https://wc26.ankai.uk** through a Cloudflare Tunnel (no inbound firewall
+ports). The bare domain `ankai.uk` is intentionally not used.
+
+- `wc26.service` — `next start` bound to `127.0.0.1:3000`
+  (WorkingDirectory = this repo, so `data/` lives here).
+- `cloudflared.service` — named tunnel `wc26`, ingress `wc26.ankai.uk` →
+  `http://localhost:3000`; config in `/etc/cloudflared/config.yml`,
+  credentials in `~/.cloudflared/`.
+
+```bash
+sudo systemctl restart wc26        # after npm run build to ship a change
+sudo journalctl -u wc26 -n 50      # app logs
+sudo journalctl -u cloudflared -n 50
+```
+
+Deploying a change = `npm run build && sudo systemctl restart wc26`. The dev
+server (`npm run dev`, port 3000) conflicts with the service — stop the
+service first or use another port.
 
 ## Architecture
 

@@ -5,7 +5,7 @@ between friends. No real money, just bragging rights.
 
 ## Quick start
 
-```powershell
+```bash
 npm install
 npm run build
 npm start                  # http://localhost:3000
@@ -15,9 +15,14 @@ npm start -- -H 0.0.0.0    # friend opens http://<your-ip>:3000
 
 - **Register first** — the first account created becomes **admin**.
 - Every new account starts with **20,000 points**.
-- If your friend can't connect, allow port 3000 once in an elevated PowerShell:
-  `New-NetFirewallRule -DisplayName "WC26BET" -Direction Inbound -Protocol TCP -LocalPort 3000 -Action Allow`
+- If your friend can't connect and you run a host firewall, allow port 3000
+  once: `sudo ufw allow 3000/tcp` (stock Debian has no firewall, so it
+  usually just works; on a cloud VM check the provider's firewall rules).
 - Development mode: `npm run dev`.
+
+In production this site runs at **https://wc26.ankai.uk** — a systemd service
+(`wc26.service`) bound to localhost, published through a Cloudflare Tunnel
+(`cloudflared.service`). See CLAUDE.md → "Production deployment".
 
 ## Features
 
@@ -76,28 +81,28 @@ Restart the server after editing.
 Authenticate with `Authorization: Bearer <token>` (or the browser session
 cookie). Get a token from register/login:
 
-```powershell
+```bash
 # register / login → token
-$r = Invoke-RestMethod -Method POST http://localhost:3000/api/auth/login `
-  -ContentType application/json -Body '{"username":"alice","password":"secret"}'
-$tok = $r.token
+tok=$(curl -s -X POST http://localhost:3000/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"alice","password":"secret"}' | jq -r .token)
 
 # check rates: all matches + every market's current odds
-Invoke-RestMethod http://localhost:3000/api/matches
+curl -s http://localhost:3000/api/matches | jq .
 
 # one match incl. expert tips
-Invoke-RestMethod http://localhost:3000/api/matches/3
+curl -s http://localhost:3000/api/matches/3 | jq .
 
 # place a bet (line is required for handicap/over-under markets)
-Invoke-RestMethod -Method POST http://localhost:3000/api/bets `
-  -Headers @{Authorization="Bearer $tok"} -ContentType application/json `
-  -Body '{"match_id":3,"market":"ah_goals","line":-0.75,"selection":"home","stake_points":500}'
+curl -s -X POST http://localhost:3000/api/bets \
+  -H "Authorization: Bearer $tok" -H 'Content-Type: application/json' \
+  -d '{"match_id":3,"market":"ah_goals","line":-0.75,"selection":"home","stake_points":500}' | jq .
 
 # my bets + balance
-Invoke-RestMethod http://localhost:3000/api/bets -Headers @{Authorization="Bearer $tok"}
+curl -s http://localhost:3000/api/bets -H "Authorization: Bearer $tok" | jq .
 
 # cancel an open bet before kickoff
-Invoke-RestMethod -Method DELETE http://localhost:3000/api/bets/7 -Headers @{Authorization="Bearer $tok"}
+curl -s -X DELETE http://localhost:3000/api/bets/7 -H "Authorization: Bearer $tok" | jq .
 ```
 
 Markets: `h2h` (`home|draw|away`), `ah_goals`/`ah_corners` (`home|away` + line),
