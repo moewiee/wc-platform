@@ -17,6 +17,7 @@ export interface User {
   username: string;
   balance_points: number;
   is_admin: number;
+  is_bot: number; // 1 = tipster bot account betting its own tips
   created_at: string;
 }
 
@@ -83,6 +84,7 @@ export interface Txn {
 export interface LeaderboardRow {
   id: number;
   username: string;
+  is_bot: number;
   balance_points: number;
   in_play_points: number;
   wins: number;
@@ -103,4 +105,5 @@ export interface Tip {
   rationale: string;
   source: "openai" | "model";
   created_at: string;
+  bet_id: number | null; // the bet the tipster's bot account placed on this tip
 }

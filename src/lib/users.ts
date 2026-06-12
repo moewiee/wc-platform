@@ -4,7 +4,7 @@ import type { LeaderboardRow, Txn } from "./types";
 export function getLeaderboard(): LeaderboardRow[] {
   return db
     .prepare(
-      `SELECT u.id, u.username, u.balance_points,
+      `SELECT u.id, u.username, u.is_bot, u.balance_points,
               COALESCE(SUM(CASE WHEN b.status = 'pending' THEN b.stake_points ELSE 0 END), 0) AS in_play_points,
               COALESCE(SUM(CASE WHEN b.status = 'won' THEN 1 ELSE 0 END), 0) AS wins,
               COALESCE(SUM(CASE WHEN b.status = 'lost' THEN 1 ELSE 0 END), 0) AS losses,

@@ -112,6 +112,15 @@ function migrate(db: Database.Database) {
   if (!matchCols.some((c) => c.name === "oio_event_id")) {
     db.exec("ALTER TABLE matches ADD COLUMN oio_event_id TEXT");
   }
+  // Added after launch: tipster bot accounts that bet their own tips.
+  const userCols = db.prepare("PRAGMA table_info(users)").all() as { name: string }[];
+  if (!userCols.some((c) => c.name === "is_bot")) {
+    db.exec("ALTER TABLE users ADD COLUMN is_bot INTEGER NOT NULL DEFAULT 0");
+  }
+  const tipCols = db.prepare("PRAGMA table_info(tips)").all() as { name: string }[];
+  if (!tipCols.some((c) => c.name === "bet_id")) {
+    db.exec("ALTER TABLE tips ADD COLUMN bet_id INTEGER");
+  }
 }
 
 // Insert seeded fixtures that aren't in the DB yet; refresh odds/details on

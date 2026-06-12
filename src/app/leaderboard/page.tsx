@@ -1,5 +1,6 @@
 import { getCurrentUser } from "@/lib/auth";
 import { fmtPts, STARTING_BALANCE_POINTS } from "@/lib/money";
+import { tipsterAvatar } from "@/lib/tipster-bets";
 import { getLeaderboard } from "@/lib/users";
 
 export const dynamic = "force-dynamic";
@@ -42,7 +43,13 @@ export default async function LeaderboardPage() {
                 >
                   <td className="px-4 py-3 font-mono">{MEDALS[i] ?? i + 1}</td>
                   <td className="px-4 py-3 font-semibold">
+                    {r.is_bot ? `${tipsterAvatar(r.username) ?? "🎙️"} ` : ""}
                     {r.username}
+                    {r.is_bot ? (
+                      <span className="ml-2 rounded bg-[#13243f] px-1.5 py-0.5 text-xs font-normal text-slate-400">
+                        tipster
+                      </span>
+                    ) : null}
                     {isMe && (
                       <span className="ml-2 text-xs font-normal text-[#f0b429]">
                         (you)

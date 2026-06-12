@@ -1,5 +1,6 @@
 import { maybeRefreshMarketOdds, maybeRefreshOdds, maybeSyncScores } from "./matches";
 import { maybeGenerateAiTips } from "./tips";
+import { maybePlaceTipsterBets } from "./tipster-bets";
 
 // Background sync so odds refresh and settlement don't depend on page
 // traffic. The tick is cheap: each maybe* step carries its own throttle
@@ -37,6 +38,14 @@ async function tick(): Promise<void> {
     }
   } catch (e) {
     console.error("[sync] ai tips failed:", e instanceof Error ? e.message : e);
+  }
+  try {
+    const res = await maybePlaceTipsterBets();
+    if ("placed" in res && res.placed > 0) {
+      console.log(`[sync] tipster bets: ${res.placed} placed (${res.tips} open tips)`);
+    }
+  } catch (e) {
+    console.error("[sync] tipster bets failed:", e instanceof Error ? e.message : e);
   }
 }
 

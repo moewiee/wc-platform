@@ -20,6 +20,7 @@ import {
 import { maybeRefreshMarketOdds, maybeRefreshOdds, maybeSyncScores } from "./matches";
 import { fmtOdds, fmtPts, parseStakeToPoints } from "./money";
 import { generateAiTipsForUpcoming } from "./tips";
+import { maybePlaceTipsterBets } from "./tipster-bets";
 import type { MarketType } from "./types";
 
 export type FormState = { error?: string; success?: string };
@@ -230,6 +231,9 @@ export async function adminGenerateTipsAction(
   const denied = await requireAdminForAction();
   if (denied) return denied;
   const res = await generateAiTipsForUpcoming();
+  // Fresh tips should hit the book straight away.
+  const bets = await maybePlaceTipsterBets(true).catch(() => null);
+  const placed = bets && "placed" in bets && bets.placed > 0 ? ` ${bets.placed} tipster bets placed.` : "";
   revalidatePath("/", "layout");
   if (res.error) {
     return {
@@ -237,7 +241,7 @@ export async function adminGenerateTipsAction(
     };
   }
   if (res.matches === 0) {
-    return { success: "All matches in the next 24 h already have AI tips." };
+    return { success: `All matches in the next 24 h already have AI tips.${placed}` };
   }
-  return { success: `Generated ${res.created} AI tips across ${res.matches} matches.` };
+  return { success: `Generated ${res.created} AI tips across ${res.matches} matches.${placed}` };
 }

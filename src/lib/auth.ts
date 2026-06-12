@@ -9,7 +9,7 @@ import type { User } from "./types";
 const SESSION_COOKIE = "wc_session";
 const SESSION_DAYS = 30;
 
-const USER_COLUMNS = "id, username, balance_points, is_admin, created_at";
+const USER_COLUMNS = "id, username, balance_points, is_admin, is_bot, created_at";
 
 function sha256(s: string): string {
   return crypto.createHash("sha256").update(s).digest("hex");
@@ -41,9 +41,11 @@ export function createUser(
   const hash = bcrypt.hashSync(password, 10);
   try {
     const user = db.transaction(() => {
+      // First *human* gets admin — tipster bot accounts don't count.
       const isFirst =
-        (db.prepare("SELECT COUNT(*) AS n FROM users").get() as { n: number })
-          .n === 0;
+        (db.prepare("SELECT COUNT(*) AS n FROM users WHERE is_bot = 0").get() as {
+          n: number;
+        }).n === 0;
       const info = db
         .prepare(
           "INSERT INTO users (username, password_hash, balance_points, is_admin, created_at) VALUES (?, ?, ?, ?, ?)"
