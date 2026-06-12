@@ -13,6 +13,7 @@ const MARKETS: ReadonlySet<string> = new Set([
   "ou_goals",
   "ou_corners",
   "ou_cards",
+  "btts",
   "correct_score",
 ]);
 
