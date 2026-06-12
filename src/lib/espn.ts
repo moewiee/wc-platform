@@ -82,9 +82,10 @@ export async function fetchEspnFinalScores(
   return finals;
 }
 
-// Total cards (yellow + red across both teams) from the match box score —
-// the definition the ou_cards market uses. Returns null when the box score
-// doesn't carry all four card stats, so callers leave those bets pending.
+// Total cards across both teams from the match box score, with a red worth
+// two yellows (yellow = 1, red = 2) — the definition the ou_cards market
+// uses. Returns null when the box score doesn't carry all four card stats,
+// so callers leave those bets pending.
 export async function fetchEspnCards(eventId: string): Promise<number | null> {
   const res = await fetch(`${SUMMARY_URL}?event=${eventId}`, { cache: "no-store" });
   if (!res.ok) return null;
@@ -99,7 +100,7 @@ export async function fetchEspnCards(eventId: string): Promise<number | null> {
       if (s.name !== "yellowCards" && s.name !== "redCards") continue;
       const n = Number(s.displayValue);
       if (!Number.isInteger(n) || n < 0) return null;
-      total += n;
+      total += s.name === "redCards" ? 2 * n : n;
       found++;
     }
   }

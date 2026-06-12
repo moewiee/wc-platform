@@ -326,7 +326,7 @@ export function marketsForMatch(match: Match): MatchMarket[] {
     }
   }
 
-  // Cards over/under (total yellow+red, flat expectation).
+  // Cards over/under (yellow = 1, red = 2; flat expectation).
   {
     const cardsTotal = 4.2;
     const dist = poissonRow(cardsTotal, 20);
