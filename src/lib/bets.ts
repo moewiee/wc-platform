@@ -9,6 +9,7 @@ import {
   fmtPts,
   halfLosePayout,
   halfWinPayout,
+  MAX_STAKE_PER_MATCH_POINTS,
   MIN_STAKE_POINTS,
   payoutPoints,
 } from "./money";
@@ -70,6 +71,22 @@ export function placeBet(
       if (!match) throw new BetError("Match not found.");
       if (match.status !== "scheduled" || Date.parse(match.kickoff) <= Date.now()) {
         throw new BetError("Betting is closed for this match.");
+      }
+      // Cap a player's total open stake on one match (across all markets).
+      const existing = (
+        db
+          .prepare(
+            "SELECT COALESCE(SUM(stake_points), 0) AS total FROM bets WHERE user_id = ? AND match_id = ? AND status = 'pending'"
+          )
+          .get(userId, matchId) as { total: number }
+      ).total;
+      if (existing + stakePoints > MAX_STAKE_PER_MATCH_POINTS) {
+        const remaining = MAX_STAKE_PER_MATCH_POINTS - existing;
+        throw new BetError(
+          remaining > 0
+            ? `You can stake at most ${fmtPts(MAX_STAKE_PER_MATCH_POINTS)} pts per match. You have ${fmtPts(remaining)} pts left on this match.`
+            : `You've reached the ${fmtPts(MAX_STAKE_PER_MATCH_POINTS)} pts per-match limit on this match.`
+        );
       }
       // Always price from the server-side market model — never trust client odds.
       const offer = findSelection(match, market, line, selection);

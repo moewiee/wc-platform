@@ -12,11 +12,13 @@ export default function MarketBoard({
   matchLabel,
   kickoff,
   markets,
+  committedPoints,
 }: {
   matchId: number;
   matchLabel: string;
   kickoff: string;
   markets: MatchMarket[];
+  committedPoints: number;
 }) {
   const [closed, setClosed] = useState(false);
   useEffect(() => {
@@ -36,6 +38,7 @@ export default function MarketBoard({
     selection: s.selection,
     selectionLabel: s.label,
     odds: s.odds,
+    matchCommittedPoints: committedPoints,
   });
 
   if (markets.length === 0) {
@@ -47,8 +50,8 @@ export default function MarketBoard({
   }
 
   const h2h = markets.find((m) => m.market === "h2h");
-  const ahGoals = markets.find((m) => m.market === "ah_goals");
-  const ahCorners = markets.find((m) => m.market === "ah_corners");
+  const ahGoals = markets.filter((m) => m.market === "ah_goals");
+  const ahCorners = markets.filter((m) => m.market === "ah_corners");
   const ouGoals = markets.filter((m) => m.market === "ou_goals");
   const ouCorners = markets.filter((m) => m.market === "ou_corners");
   const ouCards = markets.filter((m) => m.market === "ou_cards");
@@ -69,6 +72,20 @@ export default function MarketBoard({
       {list.map((m) => (
         <div key={`${m.market}-${m.line}`} className="grid grid-cols-[3rem_1fr_1fr] items-center gap-2">
           <span className="text-center font-mono text-sm text-slate-300">{m.line}</span>
+          {m.selections.map((s) => (
+            <OddsButton key={s.selection} wide sub={s.label} sel={toSel(m, s)} disabled={closed} />
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+
+  // AH ladder: each line is a row of the two (home/away) prices. The button
+  // labels already carry the signed handicap, so each row reads on its own.
+  const AhRows = ({ list }: { list: MatchMarket[] }) => (
+    <div className="space-y-2">
+      {list.map((m) => (
+        <div key={`${m.market}-${m.line}`} className="grid grid-cols-2 gap-2">
           {m.selections.map((s) => (
             <OddsButton key={s.selection} wide sub={s.label} sel={toSel(m, s)} disabled={closed} />
           ))}
@@ -108,24 +125,16 @@ export default function MarketBoard({
         </div>
       )}
 
-      {(ahGoals || ahCorners) && (
+      {(ahGoals.length > 0 || ahCorners.length > 0) && (
         <div className="grid gap-4 sm:grid-cols-2">
-          {ahGoals && (
-            <Panel title={ahGoals.name}>
-              <div className="grid grid-cols-2 gap-2">
-                {ahGoals.selections.map((s) => (
-                  <OddsButton key={s.selection} wide sub={s.label} sel={toSel(ahGoals, s)} disabled={closed} />
-                ))}
-              </div>
+          {ahGoals.length > 0 && (
+            <Panel title="Asian Handicap">
+              <AhRows list={ahGoals} />
             </Panel>
           )}
-          {ahCorners && (
-            <Panel title={ahCorners.name}>
-              <div className="grid grid-cols-2 gap-2">
-                {ahCorners.selections.map((s) => (
-                  <OddsButton key={s.selection} wide sub={s.label} sel={toSel(ahCorners, s)} disabled={closed} />
-                ))}
-              </div>
+          {ahCorners.length > 0 && (
+            <Panel title="Corners Handicap">
+              <AhRows list={ahCorners} />
             </Panel>
           )}
         </div>

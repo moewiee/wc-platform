@@ -38,6 +38,9 @@ export default async function MatchPage({
   const tips = getTips(match.id);
   const user = await getCurrentUser();
   const myBets = user ? listUserBetsForMatch(user.id, match.id) : [];
+  const committedPoints = myBets
+    .filter((b) => b.status === "pending")
+    .reduce((sum, b) => sum + b.stake_points, 0);
   const markets = match.status === "scheduled" ? marketsForMatch(match) : [];
 
   return (
@@ -93,6 +96,7 @@ export default async function MatchPage({
           matchLabel={`${match.home_team} vs ${match.away_team}`}
           kickoff={match.kickoff}
           markets={markets}
+          committedPoints={committedPoints}
         />
       )}
 

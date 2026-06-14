@@ -9,7 +9,13 @@ import {
 } from "react";
 import { useActionState } from "react";
 import { placeBetAction, type FormState } from "@/lib/actions";
-import { fmtOdds, fmtPts, parseStakeToPoints, payoutPoints } from "@/lib/money";
+import {
+  fmtOdds,
+  fmtPts,
+  MAX_STAKE_PER_MATCH_POINTS,
+  parseStakeToPoints,
+  payoutPoints,
+} from "@/lib/money";
 
 export interface SlipSelection {
   matchId: number;
@@ -21,6 +27,10 @@ export interface SlipSelection {
   selection: string;
   selectionLabel: string;
   odds: number; // x1000
+  // Points the player already has staked (open) on this match, across all
+  // markets — used to mirror the per-match stake cap. Undefined on surfaces
+  // that don't track it (server enforcement still applies).
+  matchCommittedPoints?: number;
 }
 
 interface SlipContext {
@@ -73,6 +83,13 @@ function BetSlipPanel({
 
   const stakePts = parseStakeToPoints(stake);
   const projected = stakePts !== null ? payoutPoints(stakePts, slip.odds) : null;
+  const committed = slip.matchCommittedPoints;
+  const matchRemaining =
+    committed === undefined
+      ? null
+      : Math.max(0, MAX_STAKE_PER_MATCH_POINTS - committed);
+  const overMatchLimit =
+    matchRemaining !== null && stakePts !== null && stakePts > matchRemaining;
 
   return (
     <div className="fixed bottom-0 right-0 z-40 w-full sm:bottom-4 sm:right-4 sm:w-80">
@@ -168,6 +185,13 @@ function BetSlipPanel({
                   </span>
                 </p>
               )}
+              {matchRemaining !== null && (
+                <p className={`text-xs ${overMatchLimit ? "text-rose-400" : "text-slate-400"}`}>
+                  {matchRemaining > 0
+                    ? `${fmtPts(matchRemaining)} of ${fmtPts(MAX_STAKE_PER_MATCH_POINTS)} pts per-match limit left on this match.`
+                    : `You've reached the ${fmtPts(MAX_STAKE_PER_MATCH_POINTS)} pts per-match limit on this match.`}
+                </p>
+              )}
               {state.error && <p className="text-xs text-rose-400">{state.error}</p>}
               {state.success && (
                 <p className="text-xs text-emerald-400">{state.success}</p>
@@ -180,7 +204,7 @@ function BetSlipPanel({
               <button
                 type="button"
                 onClick={() => setConfirming(true)}
-                disabled={pending || closedFor || stakePts === null}
+                disabled={pending || closedFor || stakePts === null || overMatchLimit}
                 className="w-full rounded-md bg-[#f0b429] py-2 text-sm font-bold uppercase tracking-wide text-[#081120] transition hover:bg-[#ffd166] disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
               >
                 {pending ? "Placing…" : "Place Bet"}

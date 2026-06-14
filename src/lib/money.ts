@@ -1,5 +1,7 @@
 export const STARTING_BALANCE_POINTS = 20_000; // every new account starts with 20,000 pts
 export const MIN_STAKE_POINTS = 10;
+// A player's open stakes on a single match (across all markets) can't exceed this.
+export const MAX_STAKE_PER_MATCH_POINTS = 2_000;
 
 // All balances/stakes/payouts are integer points.
 export function fmtPts(points: number): string {

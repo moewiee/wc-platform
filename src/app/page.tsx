@@ -1,7 +1,7 @@
 import Link from "next/link";
 import OddsBoard, { type BoardRow } from "@/components/OddsBoard";
 import { getCurrentUser } from "@/lib/auth";
-import { marketsForMatch } from "@/lib/markets";
+import { marketsForMatch, type MatchMarket } from "@/lib/markets";
 import { listMatches, maybeRefreshOdds, maybeSyncScores } from "@/lib/matches";
 import type { Match } from "@/lib/types";
 
@@ -10,17 +10,17 @@ export const dynamic = "force-dynamic";
 function toRow(match: Match): BoardRow {
   const markets = match.status === "scheduled" ? marketsForMatch(match) : [];
   const h2h = markets.find((m) => m.market === "h2h");
-  const ah = markets.find((m) => m.market === "ah_goals");
-  // Show the most balanced O/U line (smallest over/under odds gap).
-  const ous = markets.filter((m) => m.market === "ou_goals");
-  const ouGap = (m: (typeof ous)[number]) => {
-    const over = m.selections.find((s) => s.selection === "over")?.odds;
-    const under = m.selections.find((s) => s.selection === "under")?.odds;
-    return over && under ? Math.abs(over - under) : Infinity;
+  // Show the main (most balanced) line — smallest gap between the two sides —
+  // for both the handicap and the O/U, mirroring the match-page ladder center.
+  const gapOf = (m: MatchMarket, a: string, b: string) => {
+    const x = m.selections.find((s) => s.selection === a)?.odds;
+    const y = m.selections.find((s) => s.selection === b)?.odds;
+    return x && y ? Math.abs(x - y) : Infinity;
   };
-  const ou = ous.length
-    ? ous.reduce((a, b) => (ouGap(b) < ouGap(a) ? b : a))
-    : undefined;
+  const mostBalanced = (list: MatchMarket[], a: string, b: string) =>
+    list.length ? list.reduce((p, c) => (gapOf(c, a, b) < gapOf(p, a, b) ? c : p)) : undefined;
+  const ah = mostBalanced(markets.filter((m) => m.market === "ah_goals"), "home", "away");
+  const ou = mostBalanced(markets.filter((m) => m.market === "ou_goals"), "over", "under");
   const pick = (mkt: typeof h2h, s: string) =>
     mkt?.selections.find((x) => x.selection === s)?.odds ?? null;
   const h = pick(h2h, "home");
