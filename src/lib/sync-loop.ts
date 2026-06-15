@@ -1,3 +1,4 @@
+import { maybeEarlyResolve } from "./bets";
 import { maybeRefreshMarketOdds, maybeRefreshOdds, maybeSyncScores } from "./matches";
 import { maybeGenerateAiTips } from "./tips";
 import { maybePlaceTipsterBets } from "./tipster-bets";
@@ -27,6 +28,12 @@ async function tick(): Promise<void> {
     await maybeSyncScores();
   } catch (e) {
     console.error("[sync] score sync failed:", e instanceof Error ? e.message : e);
+  }
+  try {
+    const res = await maybeEarlyResolve();
+    if (res.resolved > 0) console.log(`[sync] early-resolved ${res.resolved} locked bets`);
+  } catch (e) {
+    console.error("[sync] early resolve failed:", e instanceof Error ? e.message : e);
   }
   try {
     const res = await maybeGenerateAiTips();

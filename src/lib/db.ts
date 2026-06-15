@@ -113,7 +113,9 @@ function migrate(db: Database.Database) {
       observed_at TEXT NOT NULL,
       minute_seen_at TEXT NOT NULL,
       last_change_at TEXT,
-      suspend_until TEXT
+      suspend_until TEXT,
+      corners_home INTEGER,
+      corners_away INTEGER
     );
     CREATE INDEX IF NOT EXISTS idx_bets_user ON bets(user_id);
     CREATE INDEX IF NOT EXISTS idx_bets_match ON bets(match_id);
@@ -148,6 +150,12 @@ function migrate(db: Database.Database) {
   const moCols = db.prepare("PRAGMA table_info(market_odds)").all() as { name: string }[];
   if (!moCols.some((c) => c.name === "in_play")) {
     db.exec("ALTER TABLE market_odds ADD COLUMN in_play INTEGER NOT NULL DEFAULT 0");
+  }
+  // Added after launch: live corner counts, for early-resolving corner O/U.
+  const lsCols = db.prepare("PRAGMA table_info(live_state)").all() as { name: string }[];
+  if (lsCols.length > 0 && !lsCols.some((c) => c.name === "corners_home")) {
+    db.exec("ALTER TABLE live_state ADD COLUMN corners_home INTEGER");
+    db.exec("ALTER TABLE live_state ADD COLUMN corners_away INTEGER");
   }
 }
 

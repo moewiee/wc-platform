@@ -56,6 +56,10 @@ const LIVE_ODDS_FORCE_MIN_MS = 8 * 1000;
 // force-fetch (no new quote) fails closed at placement instead of booking a
 // quote up to LIVE_QUOTE_FRESH_MS old (which the slower display board tolerates).
 const PLACEMENT_QUOTE_FRESH_MS = 20 * 1000;
+// Early settlement acts only on a score that has held steady this long, so a
+// goal later disallowed by VAR (the feed reverts within the window) never
+// triggers a wrongful settle.
+const EARLY_RESOLVE_CONFIRM_MS = 5 * 60 * 1000;
 
 export interface LiveScoreRow {
   match_id: number;
@@ -75,6 +79,8 @@ interface LiveStateRow {
   minute_seen_at: string;
   last_change_at: string | null;
   suspend_until: string | null;
+  corners_home: number | null;
+  corners_away: number | null;
 }
 
 export interface LiveContext {
@@ -139,9 +145,11 @@ const getStateRow = db.prepare("SELECT * FROM live_state WHERE match_id = ?");
 const upsertState = db.prepare(`
   INSERT INTO live_state
     (match_id, home_score, away_score, minute, state, detail,
-     observed_at, minute_seen_at, last_change_at, suspend_until)
+     observed_at, minute_seen_at, last_change_at, suspend_until,
+     corners_home, corners_away)
   VALUES (@match_id, @home_score, @away_score, @minute, @state, @detail,
-          @observed_at, @minute_seen_at, @last_change_at, @suspend_until)
+          @observed_at, @minute_seen_at, @last_change_at, @suspend_until,
+          @corners_home, @corners_away)
   ON CONFLICT(match_id) DO UPDATE SET
     home_score = excluded.home_score,
     away_score = excluded.away_score,
@@ -151,7 +159,9 @@ const upsertState = db.prepare(`
     observed_at = excluded.observed_at,
     minute_seen_at = excluded.minute_seen_at,
     last_change_at = excluded.last_change_at,
-    suspend_until = excluded.suspend_until
+    suspend_until = excluded.suspend_until,
+    corners_home = excluded.corners_home,
+    corners_away = excluded.corners_away
 `);
 
 // Persist the latest feed observation for every started, unsettled match.
@@ -186,10 +196,14 @@ function syncLiveState(feed: EspnLiveScore[]): void {
         detail: s.detail,
         observed_at: now,
         minute_seen_at: minuteUnchanged ? prev!.minute_seen_at : now,
-        last_change_at: scoreChanged ? now : (prev?.last_change_at ?? null),
+        // "stable since": reset on a score change AND at first observation, so
+        // early settlement only acts on a score we've watched hold steady.
+        last_change_at: scoreChanged || !prev ? now : prev.last_change_at,
         suspend_until: scoreChanged
           ? new Date(nowMs + COOLOFF_MS).toISOString()
           : (prev?.suspend_until ?? null),
+        corners_home: s.corners_home,
+        corners_away: s.corners_away,
       });
     }
   })();
@@ -249,6 +263,31 @@ async function refreshLiveOdds(
       for (const q of qs) ins.run(m.id, q.market, q.line, q.selection, q.odds, ts);
     }
   })();
+}
+
+// The live score (and live corner total, when the feed carries it) for a match
+// ONLY if it's safe to settle bets against early: a fresh observation (not
+// stale) that has held steady for the confirmation window (so it isn't a goal
+// mid-VAR). Null otherwise.
+export function getConfirmedLiveScore(
+  matchId: number
+): { home: number; away: number; cornersTotal: number | null } | null {
+  const row = getStateRow.get(matchId) as LiveStateRow | undefined;
+  if (!row || !row.last_change_at) return null;
+  const now = Date.now();
+  if (now - Date.parse(row.observed_at) > STALE_MS) return null; // feed gone quiet — don't trust it
+  if (now - Date.parse(row.last_change_at) < EARLY_RESOLVE_CONFIRM_MS) return null; // not yet stable
+  const cornersTotal =
+    row.corners_home !== null && row.corners_away !== null
+      ? row.corners_home + row.corners_away
+      : null;
+  return { home: row.home_score, away: row.away_score, cornersTotal };
+}
+
+// Refresh ESPN observations (score/clock/corners) into live_state with no odds
+// fetch — used by the sync loop so early settlement works without page traffic.
+export async function refreshLiveObservations(): Promise<void> {
+  await refreshLiveState(FRESH_TTL_MS);
 }
 
 // Has this match a live (in_play=1) quote written within the placement window?

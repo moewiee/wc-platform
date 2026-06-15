@@ -167,6 +167,8 @@ export interface EspnLiveScore {
   detail: string; // shortDetail, e.g. "HT", "FT", "2nd Half" — NOT a minute
   displayClock: string; // running clock string, e.g. "67'", "45'+2"
   clockSeconds: number | null; // elapsed seconds when the feed provides it
+  corners_home: number | null; // live wonCorners when the scoreboard carries it
+  corners_away: number | null;
 }
 
 // Matches currently being played (state "in") or just ended but not yet
@@ -211,6 +213,8 @@ export async function fetchEspnLiveScores(): Promise<EspnLiveScore[]> {
       detail,
       displayClock,
       clockSeconds,
+      corners_home: intStat(home, "wonCorners"),
+      corners_away: intStat(away, "wonCorners"),
     });
   }
   return live;

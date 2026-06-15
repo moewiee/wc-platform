@@ -2,17 +2,21 @@ import { db, nowIso } from "./db";
 import {
   findLiveSelection,
   findSelection,
+  lockedOutcome,
   settleSelection,
   type ResultData,
   type SettleOutcome,
 } from "./markets";
 import {
+  getConfirmedLiveScore,
   getLiveContext,
   getLiveContextSync,
   hasFreshLiveQuote,
   inPlayEnabled,
+  refreshLiveObservations,
   type LiveContext,
 } from "./live";
+import { fetchEspnCards } from "./espn";
 import {
   fmtPts,
   halfLosePayout,
@@ -483,6 +487,79 @@ export function completeMatchData(
     if (e instanceof BetError) return { error: e.message };
     throw e;
   }
+}
+
+// Markets whose outcome can become mathematically locked before full time
+// (monotonic in a tally that only rises: goals, corners, cards).
+const EARLY_RESOLVE_MARKETS = [
+  "ou_goals",
+  "ou_corners",
+  "ou_cards",
+  "correct_score",
+  "btts",
+] as const;
+
+// Settle bets already decided by the live tallies (sure win / sure loss)
+// without waiting for full time — an Over once its total clears the line, a
+// correct score once it's overtaken, BTTS once both teams have scored. Acts
+// only on a VAR-safe confirmed-stable observation (getConfirmedLiveScore);
+// corner/card totals come from ESPN (corners live in the scoreboard, cards via
+// the box-score summary). The match stays 'scheduled' and settleMatch later
+// settles whatever is still pending, so a bet is never settled twice. Async
+// (refreshes ESPN + may fetch cards) — runs from the sync loop.
+export async function maybeEarlyResolve(): Promise<{ resolved: number }> {
+  await refreshLiveObservations(); // keep live_state fresh even with no page traffic
+  const live = db
+    .prepare(
+      "SELECT id, api_id, home_team, away_team FROM matches WHERE status = 'scheduled' AND kickoff <= ?"
+    )
+    .all(nowIso()) as Pick<Match, "id" | "api_id" | "home_team" | "away_team">[];
+  const placeholders = EARLY_RESOLVE_MARKETS.map(() => "?").join(",");
+  let resolved = 0;
+  for (const m of live) {
+    const score = getConfirmedLiveScore(m.id);
+    if (!score) continue;
+    const pending = db
+      .prepare(
+        `SELECT * FROM bets WHERE match_id = ? AND status = 'pending' AND market IN (${placeholders})`
+      )
+      .all(m.id, ...EARLY_RESOLVE_MARKETS) as Bet[];
+    if (pending.length === 0) continue;
+    // Live card total only when a card bet is open and we have an ESPN id.
+    let cardsTotal: number | null = null;
+    if (pending.some((b) => b.market === "ou_cards") && m.api_id?.startsWith("espn:")) {
+      cardsTotal = await fetchEspnCards(m.api_id.slice(5)).catch(() => null);
+    }
+    const tallies = {
+      homeScore: score.home,
+      awayScore: score.away,
+      cornersTotal: score.cornersTotal,
+      cardsTotal,
+    };
+    for (const bet of pending) {
+      const outcome = lockedOutcome(bet.market, bet.line, bet.selection, tallies);
+      if (!outcome) continue;
+      const didResolve = db.transaction(() => {
+        const fresh = getBet(bet.id);
+        if (!fresh || fresh.status !== "pending") return false; // raced with another settle
+        const context = `live ${m.home_team} ${score.home}-${score.away} ${m.away_team}`;
+        if (outcome === "won") {
+          const payout = fresh.potential_payout_points;
+          db.prepare(
+            "UPDATE bets SET status = 'won', payout_points = ?, settled_at = ? WHERE id = ?"
+          ).run(payout, nowIso(), fresh.id);
+          applyBalanceChange(fresh.user_id, payout, "bet_payout", fresh.id, `Early win: ${fresh.label} (${context})`);
+        } else {
+          db.prepare(
+            "UPDATE bets SET status = 'lost', payout_points = 0, settled_at = ? WHERE id = ?"
+          ).run(nowIso(), fresh.id);
+        }
+        return true;
+      })();
+      if (didResolve) resolved++;
+    }
+  }
+  return { resolved };
 }
 
 // Void a match (e.g. postponed): refund every pending stake.

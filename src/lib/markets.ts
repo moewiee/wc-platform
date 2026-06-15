@@ -481,3 +481,58 @@ export function settleSelection(
     }
   }
 }
+
+// ── Early settlement ─────────────────────────────────────────────────────────
+//
+// Some bets are mathematically decided before full time because their result
+// is MONOTONIC in a live tally that only ever increases (goals, corners,
+// cards): an Over once the tally passes the line (sure win), an Under once it
+// does (sure lose), a correct-score cell once the score exceeds it (sure lose,
+// impossible), BTTS once both teams have scored. Returns the locked final
+// outcome, or null if it can still change. AH/1X2 can still flip (never
+// lockable early); a totals tally that isn't available live yields null.
+// Callers must confirm the live tally is stable (not a feed glitch /
+// VAR-disallowed goal) before acting.
+
+export interface LiveTallies {
+  homeScore: number;
+  awayScore: number;
+  cornersTotal: number | null; // null when not available live → no early resolve
+  cardsTotal: number | null;
+}
+
+// For an over/under line: "win" (over) / "lose" (under) is absorbing as the
+// tally grows; a half/push result is not yet locked. Quarter lines therefore
+// only lock once the tally clears BOTH sub-lines.
+function lockedTotal(tally: number, line: number, selection: string): "won" | "lost" | null {
+  if (selection === "over") return settleTotals(tally, line, "over") === "win" ? "won" : null;
+  if (selection === "under") return settleTotals(tally, line, "under") === "lose" ? "lost" : null;
+  return null;
+}
+
+export function lockedOutcome(
+  market: MarketType,
+  line: number | null,
+  selection: string,
+  t: LiveTallies
+): "won" | "lost" | null {
+  switch (market) {
+    case "ou_goals":
+      return lockedTotal(t.homeScore + t.awayScore, line ?? 2.5, selection);
+    case "ou_corners":
+      return t.cornersTotal === null ? null : lockedTotal(t.cornersTotal, line ?? 9.5, selection);
+    case "ou_cards":
+      return t.cardsTotal === null ? null : lockedTotal(t.cardsTotal, line ?? 4.5, selection);
+    case "btts":
+      if (t.homeScore >= 1 && t.awayScore >= 1) return selection === "yes" ? "won" : "lost";
+      return null;
+    case "correct_score": {
+      const m = /^(\d+)-(\d+)$/.exec(selection);
+      if (!m) return null; // other_* buckets aren't monotonically lockable
+      if (t.homeScore > Number(m[1]) || t.awayScore > Number(m[2])) return "lost"; // now impossible
+      return null;
+    }
+    default:
+      return null;
+  }
+}
