@@ -1,14 +1,23 @@
 import { db, nowIso } from "./db";
 import {
+  findLiveSelection,
   findSelection,
   settleSelection,
   type ResultData,
   type SettleOutcome,
 } from "./markets";
 import {
+  getLiveContext,
+  getLiveContextSync,
+  hasFreshLiveQuote,
+  inPlayEnabled,
+  type LiveContext,
+} from "./live";
+import {
   fmtPts,
   halfLosePayout,
   halfWinPayout,
+  MAX_INPLAY_STAKE_PER_MATCH_POINTS,
   MAX_STAKE_PER_MATCH_POINTS,
   MIN_STAKE_POINTS,
   payoutPoints,
@@ -16,6 +25,19 @@ import {
 import type { Bet, BetWithMatch, MarketType, Match, OpenBetRow, Pick3 } from "./types";
 
 class BetError extends Error {}
+// Thrown when an in-play price has moved materially against the bettor since
+// they saw it; carries the fresh price so the UI can re-quote.
+class RequoteError extends Error {
+  constructor(message: string, readonly newOdds: number) {
+    super(message);
+  }
+}
+
+// Re-quote only when the fresh live price is more than this fraction WORSE for
+// the bettor than the price they submitted. One-directional: any other move
+// (including one in the bettor's favour) books at the genuine fresh price, so a
+// bettor can't use the check to fish for a better-than-current price.
+const INPLAY_ODDS_TOLERANCE = 0.02;
 
 // Players can only cancel a bet within this window after placing it (and
 // never once the match has kicked off).
@@ -52,76 +74,187 @@ function applyBalanceChange(
   return newBalance;
 }
 
-export function placeBet(
+export interface PlaceBetResult {
+  bet?: Bet;
+  error?: string;
+  newOdds?: number; // present on an in-play re-quote (×1000)
+}
+
+// Insert a priced bet and debit the stake. MUST run inside a db.transaction.
+function recordBet(
+  userId: number,
+  match: Match,
+  market: MarketType,
+  line: number | null,
+  selection: string,
+  offer: { odds: number; label: string },
+  stakePoints: number,
+  inPlay: boolean,
+  noteSuffix: string
+): Bet {
+  const payout = payoutPoints(stakePoints, offer.odds);
+  const info = db
+    .prepare(
+      `INSERT INTO bets (user_id, match_id, market, line, selection, label,
+         stake_points, odds, potential_payout_points, in_play, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`
+    )
+    .run(
+      userId,
+      match.id,
+      market,
+      line,
+      selection,
+      offer.label,
+      stakePoints,
+      offer.odds,
+      payout,
+      inPlay ? 1 : 0,
+      nowIso()
+    );
+  const betId = Number(info.lastInsertRowid);
+  applyBalanceChange(
+    userId,
+    -stakePoints,
+    "bet_stake",
+    betId,
+    `${offer.label} (${match.home_team} vs ${match.away_team})${noteSuffix}`
+  );
+  return getBet(betId)!;
+}
+
+// Per-match open-stake cap across all markets (pre-match + in-play combined).
+// Throws if the new stake would breach it. Must run inside the transaction.
+function assertMatchCap(userId: number, matchId: number, stakePoints: number): void {
+  const existing = (
+    db
+      .prepare(
+        "SELECT COALESCE(SUM(stake_points), 0) AS total FROM bets WHERE user_id = ? AND match_id = ? AND status = 'pending'"
+      )
+      .get(userId, matchId) as { total: number }
+  ).total;
+  if (existing + stakePoints > MAX_STAKE_PER_MATCH_POINTS) {
+    const remaining = MAX_STAKE_PER_MATCH_POINTS - existing;
+    throw new BetError(
+      remaining > 0
+        ? `You can stake at most ${fmtPts(MAX_STAKE_PER_MATCH_POINTS)} pts per match. You have ${fmtPts(remaining)} pts left on this match.`
+        : `You've reached the ${fmtPts(MAX_STAKE_PER_MATCH_POINTS)} pts per-match limit on this match.`
+    );
+  }
+}
+
+export async function placeBet(
   userId: number,
   matchId: number,
   market: MarketType,
   line: number | null,
   selection: string,
-  stakePoints: number
-): { bet?: Bet; error?: string } {
+  stakePoints: number,
+  expectedOdds?: number | null
+): Promise<PlaceBetResult> {
   if (!Number.isInteger(stakePoints) || stakePoints < MIN_STAKE_POINTS) {
     return { error: `Minimum stake is ${fmtPts(MIN_STAKE_POINTS)} pts.` };
   }
+  const match = db
+    .prepare("SELECT * FROM matches WHERE id = ?")
+    .get(matchId) as Match | undefined;
+  if (!match) return { error: "Match not found." };
+  if (match.status !== "scheduled") {
+    return { error: "Betting is closed for this match." };
+  }
+
+  // In-play: a started match. Acquire a fresh live observation (async) BEFORE
+  // the synchronous booking transaction, then re-check suspension inside it.
+  if (Date.parse(match.kickoff) <= Date.now()) {
+    if (!inPlayEnabled()) return { error: "Betting is closed for this match." };
+    // force = true: pull the freshest Bet365 quote + score right now, so the
+    // bet is priced on current data, not the (slower) display poll.
+    const ctx = await getLiveContext(match, true);
+    if (!ctx.available || ctx.suspended || ctx.minute === null) {
+      return { error: ctx.reason || "In-play betting is paused for this match." };
+    }
+    return bookInPlay(userId, match, market, line, selection, stakePoints, expectedOdds);
+  }
+
+  // Pre-match: the counter is still open.
   try {
     const bet = db.transaction(() => {
-      const match = db
-        .prepare("SELECT * FROM matches WHERE id = ?")
-        .get(matchId) as Match | undefined;
-      if (!match) throw new BetError("Match not found.");
-      if (match.status !== "scheduled" || Date.parse(match.kickoff) <= Date.now()) {
+      const fresh = db.prepare("SELECT * FROM matches WHERE id = ?").get(matchId) as Match;
+      if (fresh.status !== "scheduled" || Date.parse(fresh.kickoff) <= Date.now()) {
         throw new BetError("Betting is closed for this match.");
       }
-      // Cap a player's total open stake on one match (across all markets).
-      const existing = (
-        db
-          .prepare(
-            "SELECT COALESCE(SUM(stake_points), 0) AS total FROM bets WHERE user_id = ? AND match_id = ? AND status = 'pending'"
-          )
-          .get(userId, matchId) as { total: number }
-      ).total;
-      if (existing + stakePoints > MAX_STAKE_PER_MATCH_POINTS) {
-        const remaining = MAX_STAKE_PER_MATCH_POINTS - existing;
-        throw new BetError(
-          remaining > 0
-            ? `You can stake at most ${fmtPts(MAX_STAKE_PER_MATCH_POINTS)} pts per match. You have ${fmtPts(remaining)} pts left on this match.`
-            : `You've reached the ${fmtPts(MAX_STAKE_PER_MATCH_POINTS)} pts per-match limit on this match.`
-        );
-      }
+      assertMatchCap(userId, matchId, stakePoints);
       // Always price from the server-side market model — never trust client odds.
       const offer = findSelection(match, market, line, selection);
       if (!offer) throw new BetError("That market is not available right now.");
-      const payout = payoutPoints(stakePoints, offer.odds);
-      const info = db
-        .prepare(
-          `INSERT INTO bets (user_id, match_id, market, line, selection, label,
-             stake_points, odds, potential_payout_points, status, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`
-        )
-        .run(
-          userId,
-          matchId,
-          market,
-          line,
-          selection,
-          offer.label,
-          stakePoints,
-          offer.odds,
-          payout,
-          nowIso()
-        );
-      const betId = Number(info.lastInsertRowid);
-      applyBalanceChange(
-        userId,
-        -stakePoints,
-        "bet_stake",
-        betId,
-        `${offer.label} (${match.home_team} vs ${match.away_team})`
-      );
-      return getBet(betId)!;
+      return recordBet(userId, match, market, line, selection, offer, stakePoints, false, "");
     })();
     return { bet };
   } catch (e) {
+    if (e instanceof BetError) return { error: e.message };
+    throw e;
+  }
+}
+
+// Book an in-play bet. The live row was just refreshed by getLiveContext; this
+// reads it again synchronously inside the transaction so the suspension gate,
+// the price, and the booked bet all share one snapshot.
+function bookInPlay(
+  userId: number,
+  match: Match,
+  market: MarketType,
+  line: number | null,
+  selection: string,
+  stakePoints: number,
+  expectedOdds: number | null | undefined
+): PlaceBetResult {
+  try {
+    const bet = db.transaction(() => {
+      const fresh = db.prepare("SELECT * FROM matches WHERE id = ?").get(match.id) as Match;
+      if (fresh.status !== "scheduled") throw new BetError("Betting is closed for this match.");
+      const ctx: LiveContext = getLiveContextSync(match);
+      if (!ctx.available || ctx.suspended || ctx.minute === null) {
+        throw new BetError(ctx.reason || "In-play betting is paused for this match.");
+      }
+      assertMatchCap(userId, match.id, stakePoints);
+      // Tighter cap on live stakes — bounds the value of any single snipe.
+      const liveOpen = (
+        db
+          .prepare(
+            "SELECT COALESCE(SUM(stake_points), 0) AS total FROM bets WHERE user_id = ? AND match_id = ? AND status = 'pending' AND in_play = 1"
+          )
+          .get(userId, match.id) as { total: number }
+      ).total;
+      if (liveOpen + stakePoints > MAX_INPLAY_STAKE_PER_MATCH_POINTS) {
+        const remaining = MAX_INPLAY_STAKE_PER_MATCH_POINTS - liveOpen;
+        throw new BetError(
+          remaining > 0
+            ? `In-play stakes are capped at ${fmtPts(MAX_INPLAY_STAKE_PER_MATCH_POINTS)} pts per match. You have ${fmtPts(remaining)} pts left here.`
+            : `You've reached the ${fmtPts(MAX_INPLAY_STAKE_PER_MATCH_POINTS)} pts in-play limit on this match.`
+        );
+      }
+      // Fail closed if the placement force-fetch couldn't land a fresh live
+      // quote (feed/quota failure, or the bookmaker isn't quoting) — never
+      // price a live bet off a stale quote the display board still tolerates.
+      if (!hasFreshLiveQuote(match.id)) {
+        throw new BetError("In-play prices are updating — try again in a moment.");
+      }
+      const offer = findLiveSelection(match, market, line, selection);
+      if (!offer) throw new BetError("That market isn't available at the live price right now.");
+      // Re-quote only when the fresh price is materially WORSE for the bettor.
+      if (
+        expectedOdds != null &&
+        Number.isFinite(expectedOdds) &&
+        offer.odds < Math.floor(expectedOdds * (1 - INPLAY_ODDS_TOLERANCE))
+      ) {
+        throw new RequoteError("The live price moved — review the new price.", offer.odds);
+      }
+      const note = ` [LIVE ${ctx.minute}' · ${ctx.homeScore}-${ctx.awayScore}]`;
+      return recordBet(userId, match, market, line, selection, offer, stakePoints, true, note);
+    })();
+    return { bet };
+  } catch (e) {
+    if (e instanceof RequoteError) return { error: e.message, newOdds: e.newOdds };
     if (e instanceof BetError) return { error: e.message };
     throw e;
   }

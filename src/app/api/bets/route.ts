@@ -29,6 +29,7 @@ export async function POST(req: Request) {
     line?: number | null;
     selection?: string;
     stake_points?: number;
+    expected_odds?: number | null; // optional: ×1000 price you saw, for in-play staleness
   };
   try {
     body = await req.json();
@@ -41,12 +42,35 @@ export async function POST(req: Request) {
     body.line === undefined || body.line === null ? null : Number(body.line);
   const selection = String(body.selection ?? "");
   const stake = Number(body.stake_points);
+  const expectedOdds =
+    body.expected_odds === undefined || body.expected_odds === null
+      ? null
+      : Number(body.expected_odds);
   if (!Number.isInteger(matchId)) return apiError(400, "match_id must be an integer.");
   if (!MARKETS.has(market)) return apiError(400, `Unknown market "${market}".`);
   if (line !== null && !Number.isFinite(line)) return apiError(400, "line must be a number or null.");
   if (!selection) return apiError(400, "selection is required.");
   if (!Number.isInteger(stake)) return apiError(400, "stake_points must be an integer.");
-  const res = placeBet(user.id, matchId, market as MarketType, line, selection, stake);
-  if (!res.bet) return apiError(400, res.error ?? "Could not place the bet.");
+  if (expectedOdds !== null && !Number.isFinite(expectedOdds))
+    return apiError(400, "expected_odds must be a number or null.");
+  const res = await placeBet(
+    user.id,
+    matchId,
+    market as MarketType,
+    line,
+    selection,
+    stake,
+    expectedOdds
+  );
+  if (!res.bet) {
+    // 409: the live price moved past tolerance — re-quote with new_odds.
+    if (res.newOdds !== undefined) {
+      return NextResponse.json(
+        { error: res.error ?? "The live price moved.", new_odds: res.newOdds },
+        { status: 409 }
+      );
+    }
+    return apiError(400, res.error ?? "Could not place the bet.");
+  }
   return NextResponse.json({ bet: betPayload(res.bet) }, { status: 201 });
 }

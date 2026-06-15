@@ -40,6 +40,11 @@ function BetCard({ bet, now }: { bet: BetWithMatch; now: number }) {
             · <LocalTime iso={bet.kickoff} />
           </Link>
           <div className="mt-1 font-semibold">
+            {bet.in_play ? (
+              <span className="mr-1.5 rounded bg-rose-950 px-1.5 py-0.5 align-middle text-[9px] font-bold uppercase tracking-wide text-rose-400">
+                Live
+              </span>
+            ) : null}
             {bet.label}{" "}
             <span className="font-normal text-slate-400">
               — {fmtPts(bet.stake_points)} pts @ {fmtOdds(bet.odds)}

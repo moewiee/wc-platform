@@ -5,28 +5,45 @@ import type { MatchMarket } from "@/lib/markets";
 import OddsButton from "./OddsButton";
 import type { SlipSelection } from "./BetSlip";
 
+export interface LiveBoardState {
+  suspended: boolean;
+  reason?: string;
+  clock: string;
+  homeScore: number;
+  awayScore: number;
+}
+
 // Full market sheet for one match, bookmaker style. Clicking any price loads
-// the bet slip.
+// the bet slip. When `live` is supplied the board is in in-play mode: the
+// kickoff timer no longer closes it (the match has already started); instead
+// betting follows the live suspension state, and selections are tagged in-play.
 export default function MarketBoard({
   matchId,
   matchLabel,
   kickoff,
   markets,
   committedPoints,
+  inPlayCommittedPoints = 0,
+  live = null,
 }: {
   matchId: number;
   matchLabel: string;
   kickoff: string;
   markets: MatchMarket[];
   committedPoints: number;
+  inPlayCommittedPoints?: number;
+  live?: LiveBoardState | null;
 }) {
-  const [closed, setClosed] = useState(false);
+  const [closedByKickoff, setClosedByKickoff] = useState(false);
   useEffect(() => {
-    const update = () => setClosed(Date.parse(kickoff) <= Date.now());
+    if (live) return; // in-play: kickoff timer is irrelevant
+    const update = () => setClosedByKickoff(Date.parse(kickoff) <= Date.now());
     update();
     const t = setInterval(update, 30_000);
     return () => clearInterval(t);
-  }, [kickoff]);
+  }, [kickoff, live]);
+
+  const closed = live ? live.suspended : closedByKickoff;
 
   const toSel = (m: MatchMarket, s: MatchMarket["selections"][number]): SlipSelection => ({
     matchId,
@@ -39,10 +56,19 @@ export default function MarketBoard({
     selectionLabel: s.label,
     odds: s.odds,
     matchCommittedPoints: committedPoints,
+    matchInPlayCommittedPoints: inPlayCommittedPoints,
+    inPlay: !!live,
   });
 
   if (markets.length === 0) {
-    return (
+    return live ? (
+      <div className="rounded-lg border border-rose-900/60 bg-rose-950/30 p-6 text-center text-sm text-rose-300">
+        <span className="font-bold">⏸ In-play paused</span>
+        <div className="mt-1 text-slate-300">
+          {live.reason || "Prices are updating — hang tight."}
+        </div>
+      </div>
+    ) : (
       <p className="rounded-lg border border-[#1b2c4a] bg-[#0e1c33] p-6 text-center text-sm text-slate-400">
         No odds quoted for this match yet.
       </p>
@@ -96,10 +122,26 @@ export default function MarketBoard({
 
   return (
     <div className="space-y-4">
-      {closed && (
-        <p className="rounded-md border border-amber-900 bg-amber-950/40 px-3 py-2 text-sm text-amber-400">
-          The counter is closed — this match has kicked off.
-        </p>
+      {live ? (
+        <div
+          className={`rounded-md border px-3 py-2 text-sm ${
+            live.suspended
+              ? "border-amber-900 bg-amber-950/40 text-amber-400"
+              : "border-rose-900/60 bg-rose-950/30 text-rose-300"
+          }`}
+        >
+          <span className="font-bold">🔴 LIVE {live.clock}</span> ·{" "}
+          {live.homeScore}–{live.awayScore} ·{" "}
+          {live.suspended
+            ? live.reason || "betting paused"
+            : "in-play prices update automatically"}
+        </div>
+      ) : (
+        closed && (
+          <p className="rounded-md border border-amber-900 bg-amber-950/40 px-3 py-2 text-sm text-amber-400">
+            The counter is closed — this match has kicked off.
+          </p>
+        )
       )}
 
       {(h2h || btts) && (

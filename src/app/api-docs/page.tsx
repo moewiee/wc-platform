@@ -120,6 +120,19 @@ curl -s -X DELETE ${BASE}/api/bets/7 -H "Authorization: Bearer $tok"`}</Code>
         <Endpoint method="GET" path="/api/matches/{id}">
           One match, same shape, plus expert tips.
         </Endpoint>
+        <Endpoint method="GET" path="/api/matches/{id}/markets">
+          <p>
+            Live (and pre-match) market sheet for one match. Once a match has
+            kicked off this returns real bookmaker <strong>in-play</strong> odds
+            plus a <code className="font-mono text-xs">live</code> block
+            (current score, minute, clock) and{" "}
+            <code className="font-mono text-xs">suspended</code> /{" "}
+            <code className="font-mono text-xs">reason</code>. While suspended
+            (just after a goal, half-time, a stale feed, or a knockout heading
+            for extra time) <code className="font-mono text-xs">markets</code> is
+            empty. Poll it for fresh prices — they move with the match.
+          </p>
+        </Endpoint>
         <Endpoint method="POST" path="/api/bets" auth>
           <p>
             Body:{" "}
@@ -133,6 +146,21 @@ curl -s -X DELETE ${BASE}/api/bets/7 -H "Authorization: Bearer $tok"`}</Code>
             <code className="font-mono text-xs">correct_score</code>. Returns the
             created bet with the odds you locked in. The server always prices from
             its own current odds — odds sent by clients are ignored.
+          </p>
+          <p>
+            <strong>In-play:</strong> the same endpoint places bets on live
+            matches, priced at the bookmaker&apos;s real in-play odds (whichever
+            markets they quote live; if none are quoted the match is suspended).
+            Optionally send{" "}
+            <code className="font-mono text-xs">&quot;expected_odds&quot;</code>{" "}
+            (the ×1000 price you saw): if the live price has moved materially
+            against you the bet is rejected with HTTP{" "}
+            <code className="font-mono text-xs">409</code> and{" "}
+            <code className="font-mono text-xs">
+              {"{"}&quot;new_odds&quot;{"}"}
+            </code>{" "}
+            so you can re-quote. In-play stakes are capped lower per match and
+            can&apos;t be cancelled.
           </p>
         </Endpoint>
         <Endpoint method="GET" path="/api/bets" auth>
@@ -216,9 +244,12 @@ curl -s -X DELETE ${BASE}/api/bets/7 -H "Authorization: Bearer $tok"`}</Code>
             Stakes, balances and payouts are whole points; minimum stake 10.
           </li>
           <li>
-            The counter closes at kickoff — no bets or cancellations after that,
-            and odds disappear from match payloads. Cancellations also close 30
-            minutes after the bet is placed.
+            The pre-match counter closes at kickoff — pre-match odds disappear
+            from <code className="font-mono text-xs">/api/matches</code> then.
+            Live games stay bettable through{" "}
+            <code className="font-mono text-xs">/api/matches/{"{id}"}/markets</code>{" "}
+            (in-play). Cancellations are pre-match only and close 30 minutes
+            after the bet is placed — in-play bets can&apos;t be cancelled.
           </li>
           <li>
             Asian quarter lines split your stake across the two adjacent lines

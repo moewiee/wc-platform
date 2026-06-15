@@ -23,7 +23,7 @@ import { generateAiTipsForUpcoming } from "./tips";
 import { maybePlaceTipsterBets } from "./tipster-bets";
 import { MARKET_TYPES, type MarketType } from "./types";
 
-export type FormState = { error?: string; success?: string };
+export type FormState = { error?: string; success?: string; newOdds?: number };
 
 const MARKETS: ReadonlySet<string> = new Set(MARKET_TYPES);
 
@@ -75,13 +75,31 @@ export async function placeBetAction(
   const line = lineRaw === "" ? null : Number(lineRaw);
   const selection = String(formData.get("selection") ?? "");
   const stake = parseStakeToPoints(String(formData.get("stake") ?? ""));
+  // The odds the bettor saw (×1000), used only as an in-play staleness check.
+  const oddsRaw = String(formData.get("odds") ?? "").trim();
+  const expectedOdds = oddsRaw === "" ? null : Number(oddsRaw);
   if (!Number.isInteger(matchId)) return { error: "Invalid match." };
   if (!MARKETS.has(market)) return { error: "Pick a market first." };
   if (line !== null && !Number.isFinite(line)) return { error: "Invalid line." };
   if (!selection) return { error: "Pick a selection first." };
   if (stake === null) return { error: "Enter a whole number of points, e.g. 100." };
-  const res = placeBet(user.id, matchId, market as MarketType, line, selection, stake);
-  if (!res.bet) return { error: res.error ?? "Could not place the bet." };
+  const res = await placeBet(
+    user.id,
+    matchId,
+    market as MarketType,
+    line,
+    selection,
+    stake,
+    expectedOdds
+  );
+  if (!res.bet) {
+    return res.newOdds !== undefined
+      ? {
+          error: `${res.error ?? "The live price moved."} New price ${fmtOdds(res.newOdds)} — review and place again.`,
+          newOdds: res.newOdds,
+        }
+      : { error: res.error ?? "Could not place the bet." };
+  }
   revalidatePath("/", "layout");
   return {
     success: `Bet placed: ${fmtPts(res.bet.stake_points)} pts at ${fmtOdds(res.bet.odds)} — potential payout ${fmtPts(res.bet.potential_payout_points)} pts.`,

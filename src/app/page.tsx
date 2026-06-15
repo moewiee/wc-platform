@@ -1,6 +1,7 @@
 import Link from "next/link";
 import OddsBoard, { type BoardRow } from "@/components/OddsBoard";
 import { getCurrentUser } from "@/lib/auth";
+import { inPlayEnabled } from "@/lib/live";
 import { marketsForMatch, type MatchMarket } from "@/lib/markets";
 import { listMatches, maybeRefreshOdds, maybeSyncScores } from "@/lib/matches";
 import type { Match } from "@/lib/types";
@@ -53,6 +54,7 @@ export default async function HomePage() {
   await Promise.allSettled([maybeRefreshOdds(), maybeSyncScores()]);
 
   const user = await getCurrentUser();
+  const inPlayBetting = inPlayEnabled();
   const matches = listMatches();
   const upcoming = matches.filter((m) => m.status === "scheduled").map(toRow);
   const finished = matches
@@ -96,7 +98,7 @@ export default async function HomePage() {
         {upcoming.length === 0 ? (
           <p className="text-slate-400">No upcoming matches right now — check back soon.</p>
         ) : (
-          <OddsBoard rows={upcoming} />
+          <OddsBoard rows={upcoming} inPlayBetting={inPlayBetting} />
         )}
       </section>
 
@@ -105,7 +107,7 @@ export default async function HomePage() {
           <h2 className="mb-3 text-sm font-bold uppercase tracking-wider text-slate-400">
             🏁 Results
           </h2>
-          <OddsBoard rows={finished} />
+          <OddsBoard rows={finished} inPlayBetting={inPlayBetting} />
         </section>
       )}
     </div>

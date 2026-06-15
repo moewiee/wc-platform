@@ -36,7 +36,8 @@ interface EspnEvent {
   competitions?: {
     date?: string;
     status?: {
-      displayClock?: string;
+      clock?: number; // elapsed seconds (e.g. 5400 at full time)
+      displayClock?: string; // running game clock, e.g. "67'"
       type?: { state?: string; completed?: boolean; shortDetail?: string };
     };
     competitors?: EspnCompetitor[];
@@ -161,7 +162,11 @@ export interface EspnLiveScore {
   away_team: string;
   home_score: number;
   away_score: number;
-  clock: string; // "71'", "HT", "FT"
+  clock: string; // display label for the lobby: "71'", "HT", "FT"
+  state: string; // ESPN match state: "pre" | "in" | "post"
+  detail: string; // shortDetail, e.g. "HT", "FT", "2nd Half" — NOT a minute
+  displayClock: string; // running clock string, e.g. "67'", "45'+2"
+  clockSeconds: number | null; // elapsed seconds when the feed provides it
 }
 
 // Matches currently being played (state "in") or just ended but not yet
@@ -190,15 +195,22 @@ export async function fetchEspnLiveScores(): Promise<EspnLiveScore[]> {
     const hs = Number(home.score);
     const as = Number(away.score);
     if (!Number.isInteger(hs) || !Number.isInteger(as)) continue;
+    const detail = status?.type?.shortDetail ?? "";
+    const displayClock = status?.displayClock ?? "";
+    const clockSeconds =
+      typeof status?.clock === "number" && Number.isFinite(status.clock)
+        ? status.clock
+        : null;
     live.push({
       home_team: home.team.displayName,
       away_team: away.team.displayName,
       home_score: hs,
       away_score: as,
-      clock:
-        state === "post"
-          ? "FT"
-          : status?.type?.shortDetail || status?.displayClock || "LIVE",
+      clock: state === "post" ? "FT" : detail || displayClock || "LIVE",
+      state: state ?? "",
+      detail,
+      displayClock,
+      clockSeconds,
     });
   }
   return live;

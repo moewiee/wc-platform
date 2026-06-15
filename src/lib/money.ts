@@ -2,6 +2,12 @@ export const STARTING_BALANCE_POINTS = 20_000; // every new account starts with 
 export const MIN_STAKE_POINTS = 10;
 // A player's open stakes on a single match (across all markets) can't exceed this.
 export const MAX_STAKE_PER_MATCH_POINTS = 2_000;
+// Of that per-match allowance, only this much may be staked once a match is
+// live. In-play prices ride a feed that lags real life, so a sharp viewer can
+// briefly know more than our model; this sub-cap bounds how much any single
+// in-play position (e.g. a goal snipe) can be worth. Counts in-play stakes
+// only; pre-match stakes still count toward MAX_STAKE_PER_MATCH_POINTS.
+export const MAX_INPLAY_STAKE_PER_MATCH_POINTS = 500;
 
 // All balances/stakes/payouts are integer points.
 export function fmtPts(points: number): string {

@@ -97,7 +97,23 @@ function migrate(db: Database.Database) {
       line REAL,
       selection TEXT NOT NULL,
       odds INTEGER NOT NULL,
-      updated_at TEXT NOT NULL
+      updated_at TEXT NOT NULL,
+      in_play INTEGER NOT NULL DEFAULT 0
+    );
+    -- Last-observed in-play state per match: drives live pricing and the
+    -- goal-change suspension cool-off. Written from the live-feed sync, read
+    -- (synchronously) inside placeBet so the priced snapshot matches the bet.
+    CREATE TABLE IF NOT EXISTS live_state (
+      match_id INTEGER PRIMARY KEY REFERENCES matches(id) ON DELETE CASCADE,
+      home_score INTEGER NOT NULL,
+      away_score INTEGER NOT NULL,
+      minute INTEGER,
+      state TEXT,
+      detail TEXT,
+      observed_at TEXT NOT NULL,
+      minute_seen_at TEXT NOT NULL,
+      last_change_at TEXT,
+      suspend_until TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_bets_user ON bets(user_id);
     CREATE INDEX IF NOT EXISTS idx_bets_match ON bets(match_id);
@@ -120,6 +136,18 @@ function migrate(db: Database.Database) {
   const tipCols = db.prepare("PRAGMA table_info(tips)").all() as { name: string }[];
   if (!tipCols.some((c) => c.name === "bet_id")) {
     db.exec("ALTER TABLE tips ADD COLUMN bet_id INTEGER");
+  }
+  // Added after launch: marks bets struck after kickoff (in-play). Display and
+  // audit only — settlement and payout logic never branch on it.
+  const betCols = db.prepare("PRAGMA table_info(bets)").all() as { name: string }[];
+  if (!betCols.some((c) => c.name === "in_play")) {
+    db.exec("ALTER TABLE bets ADD COLUMN in_play INTEGER NOT NULL DEFAULT 0");
+  }
+  // Added after launch: separates live (in_play=1) from pre-match (0) quotes so
+  // the in-play sheet can never read a stale pre-match price.
+  const moCols = db.prepare("PRAGMA table_info(market_odds)").all() as { name: string }[];
+  if (!moCols.some((c) => c.name === "in_play")) {
+    db.exec("ALTER TABLE market_odds ADD COLUMN in_play INTEGER NOT NULL DEFAULT 0");
   }
 }
 

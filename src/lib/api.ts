@@ -54,6 +54,7 @@ export function betPayload(bet: Bet) {
     potential_payout_points: bet.potential_payout_points,
     payout_points: bet.payout_points,
     status: bet.status,
+    in_play: !!bet.in_play,
     created_at: bet.created_at,
     settled_at: bet.settled_at,
   };

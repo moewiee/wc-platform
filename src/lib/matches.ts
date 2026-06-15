@@ -23,8 +23,20 @@ import type { Match } from "./types";
 const ODDS_REFRESH_KEYED_MS = 30 * 60 * 1000;
 const ODDS_REFRESH_KEYLESS_MS = 10 * 60 * 1000;
 const SCORES_SYNC_MS = 10 * 60 * 1000;
+// Don't auto-settle a started match until a full match could plausibly have
+// elapsed. Now that bets can be placed in-play, a feed that briefly reports a
+// running game "completed" (an HT/transition glitch, or the end of regulation
+// in a knockout heading to extra time) would otherwise settle every open bet
+// on an interim score and the one-way guard would lock it. The admin's manual
+// settle bypasses this floor.
+const GROUP_FULLTIME_FLOOR_MS = 110 * 60 * 1000; // 90' + half-time + stoppage
+const KO_FULLTIME_FLOOR_MS = 140 * 60 * 1000; // + possible extra time/penalties
 const MARKET_ODDS_REFRESH_MS = 10 * 60 * 1000;
 const MARKET_ODDS_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+// One /odds/multi call returns up to 10 matches with ALL their markets, so we
+// fetch only the nearest 10 upcoming fixtures per refresh — exactly one odds
+// call — to conserve the odds-api.io quota.
+const MARKET_ODDS_MAX_MATCHES = 10;
 
 // The active 1X2 refresh cadence, for UI copy ("refreshed every N min").
 export function oddsRefreshMinutes(): number {
@@ -171,10 +183,10 @@ export async function maybeRefreshOdds(force = false): Promise<SyncResult> {
 }
 
 // Real per-market quotes (AH, totals, BTTS, correct score, corners, cards)
-// from odds-api.io for matches kicking off within the next 7 days; they
-// overlay the Poisson prices in marketsForMatch. Quota: ≤40 matches means
-// at most 1 events call (only while ids are unmapped) + 4 batched odds
-// calls per refresh — ~24 requests/hour against the free tier's 100.
+// from odds-api.io for the nearest upcoming fixtures; they overlay the Poisson
+// prices in marketsForMatch. Quota: the nearest 10 matches = exactly 1 batched
+// /odds call per refresh (+ a rare events call only while ids are unmapped) —
+// ~6 requests/hour against the free tier's 100.
 export async function maybeRefreshMarketOdds(force = false): Promise<SyncResult> {
   if (!oioConfigured()) return { skipped: "ODDS_API_IO_KEY is not configured." };
   const last = getMeta("last_market_odds_refresh");
@@ -184,13 +196,14 @@ export async function maybeRefreshMarketOdds(force = false): Promise<SyncResult>
   setMeta("last_market_odds_refresh", nowIso());
 
   const now = Date.now();
+  // listMatches() is ordered by kickoff, so this is the nearest N upcoming.
   const targets = listMatches()
     .filter((m) => {
       if (m.status !== "scheduled") return false;
       const kickoff = Date.parse(m.kickoff);
       return kickoff > now && kickoff - now < MARKET_ODDS_WINDOW_MS;
     })
-    .slice(0, 40);
+    .slice(0, MARKET_ODDS_MAX_MATCHES);
   if (targets.length === 0) return { updated: 0 };
 
   try {
@@ -211,10 +224,11 @@ export async function maybeRefreshMarketOdds(force = false): Promise<SyncResult>
     const mapped = targets.filter((m) => m.oio_event_id);
     const quotes = await fetchOioQuotes(mapped.map((m) => m.oio_event_id!));
 
-    const del = db.prepare("DELETE FROM market_odds WHERE match_id = ?");
+    // Pre-match rows only (in_play = 0); the live refresh owns in_play = 1.
+    const del = db.prepare("DELETE FROM market_odds WHERE match_id = ? AND in_play = 0");
     const ins = db.prepare(
-      `INSERT INTO market_odds (match_id, market, line, selection, odds, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)`
+      `INSERT INTO market_odds (match_id, market, line, selection, odds, updated_at, in_play)
+       VALUES (?, ?, ?, ?, ?, ?, 0)`
     );
     let updated = 0;
     const ts = nowIso();
@@ -307,9 +321,9 @@ export async function maybeSyncScores(force = false): Promise<SyncResult> {
 
   const open = db
     .prepare(
-      "SELECT id, api_id, home_team, away_team FROM matches WHERE status = 'scheduled'"
+      "SELECT id, api_id, home_team, away_team, kickoff, group_name FROM matches WHERE status = 'scheduled'"
     )
-    .all() as Pick<Match, "id" | "api_id" | "home_team" | "away_team">[];
+    .all() as Pick<Match, "id" | "api_id" | "home_team" | "away_team" | "kickoff" | "group_name">[];
   const byApiId = new Map(open.filter((m) => m.api_id).map((m) => [m.api_id!, m]));
   const byPair = new Map(
     open.map((m) => [teamPairKey(m.home_team, m.away_team), m])
@@ -320,6 +334,10 @@ export async function maybeSyncScores(force = false): Promise<SyncResult> {
     const match =
       (s.apiId && byApiId.get(s.apiId)) ?? byPair.get(teamPairKey(s.home, s.away));
     if (!match) continue;
+    // Full-time floor: ignore a "completed" report on a match too young to
+    // have truly finished, so a feed glitch can't settle a live game early.
+    const floor = match.group_name ? GROUP_FULLTIME_FLOOR_MS : KO_FULLTIME_FLOOR_MS;
+    if (Date.now() - Date.parse(match.kickoff) < floor) continue;
     const res = settleMatch(match.id, {
       homeScore: s.homeScore,
       awayScore: s.awayScore,

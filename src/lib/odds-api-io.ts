@@ -10,26 +10,62 @@ const BASE = "https://api.odds-api.io/v3";
 const LEAGUE = "international-fifa-world-cup";
 const BOOKMAKER = "Bet365";
 
+// ODDS_API_IO_KEY may hold several comma-separated keys (e.g. multiple free
+// accounts): we round-robin across them and fail over on rate-limit so their
+// quotas add up. Only multiplies the limit if odds-api.io meters per key.
+function oioKeys(): string[] {
+  return (process.env.ODDS_API_IO_KEY ?? "")
+    .split(",")
+    .map((k) => k.trim())
+    .filter(Boolean);
+}
+
 export function oioConfigured(): boolean {
-  return !!process.env.ODDS_API_IO_KEY;
+  return oioKeys().length > 0;
 }
 
-function apiKey(): string {
-  const k = process.env.ODDS_API_IO_KEY;
-  if (!k) throw new Error("ODDS_API_IO_KEY is not configured");
-  return k;
+// Round-robin cursor across the configured keys (module-scoped, best-effort).
+let keyCursor = 0;
+
+function isQuotaError(msg: string): boolean {
+  return /rate|limit|quota|exceed|too many/i.test(msg);
 }
 
+// GET `url` (which must NOT include apiKey — it's appended here) as JSON,
+// rotating keys per call and failing over to the next key on a rate-limit
+// (HTTP 429 or a quota-style 200 {error}). Throws on a real domain error or
+// when every key is exhausted.
 async function getJson(url: string): Promise<unknown> {
-  const res = await fetch(url, { cache: "no-store" });
-  const body = await res.text();
-  if (!res.ok) throw new Error(`odds-api.io ${res.status}: ${body.slice(0, 200)}`);
-  const data: unknown = JSON.parse(body);
-  // The API reports domain errors (bad league, bad bookmaker) with HTTP 200.
-  if (data && typeof data === "object" && "error" in data) {
-    throw new Error(`odds-api.io: ${(data as { error: string }).error}`);
+  const keys = oioKeys();
+  if (keys.length === 0) throw new Error("ODDS_API_IO_KEY is not configured");
+  const sep = url.includes("?") ? "&" : "?";
+  let lastErr: unknown;
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[(keyCursor + i) % keys.length];
+    const res = await fetch(`${url}${sep}apiKey=${encodeURIComponent(key)}`, {
+      cache: "no-store",
+    });
+    const body = await res.text();
+    if (res.status === 429) {
+      lastErr = new Error(`odds-api.io 429 (rate limited): ${body.slice(0, 120)}`);
+      continue; // try the next key
+    }
+    if (!res.ok) throw new Error(`odds-api.io ${res.status}: ${body.slice(0, 200)}`);
+    const data: unknown = JSON.parse(body);
+    // The API reports domain errors (bad league/bookmaker) with HTTP 200; a
+    // quota-style message there is also a reason to fail over.
+    if (data && typeof data === "object" && "error" in data) {
+      const msg = String((data as { error: string }).error);
+      if (isQuotaError(msg) && i < keys.length - 1) {
+        lastErr = new Error(`odds-api.io: ${msg}`);
+        continue;
+      }
+      throw new Error(`odds-api.io: ${msg}`);
+    }
+    keyCursor = (keyCursor + i + 1) % keys.length; // spread the next call onward
+    return data;
   }
-  return data;
+  throw lastErr ?? new Error("odds-api.io: all keys rate limited");
 }
 
 export interface OioEvent {
@@ -41,7 +77,16 @@ export interface OioEvent {
 
 export async function fetchOioEvents(): Promise<OioEvent[]> {
   const data = await getJson(
-    `${BASE}/events?apiKey=${apiKey()}&sport=football&league=${LEAGUE}&status=pending&limit=200`
+    `${BASE}/events?sport=football&league=${LEAGUE}&status=pending&limit=200`
+  );
+  return (Array.isArray(data) ? data : []) as OioEvent[];
+}
+
+// Currently in-play World Cup events — for mapping live matches whose
+// oio_event_id wasn't set during the pre-match pass. Same shape as above.
+export async function fetchOioLiveEvents(): Promise<OioEvent[]> {
+  const data = await getJson(
+    `${BASE}/events?sport=football&league=${LEAGUE}&status=live&limit=50`
   );
   return (Array.isArray(data) ? data : []) as OioEvent[];
 }
@@ -84,6 +129,18 @@ export function parseOioMarkets(feedMarkets: OioMarket[]): OioQuote[] {
   // Keyed so later sources overwrite earlier ones on the same line.
   const out = new Map<string, OioQuote>();
   const put = (q: OioQuote) => out.set(`${q.market}|${q.line}|${q.selection}`, q);
+
+  // Match result (1X2) from the bookmaker's moneyline. Same {home,draw,away}
+  // shape pre-match and in-play, so this is the live 1X2 source too.
+  for (const e of byName.get("ML")?.odds ?? []) {
+    const home = dec(e.home);
+    const draw = dec(e.draw);
+    const away = dec(e.away);
+    if (home === null || draw === null || away === null) continue;
+    put({ market: "h2h", line: null, selection: "home", odds: home });
+    put({ market: "h2h", line: null, selection: "draw", odds: draw });
+    put({ market: "h2h", line: null, selection: "away", odds: away });
+  }
 
   for (const [src, market] of AH_SOURCES) {
     for (const e of byName.get(src)?.odds ?? []) {
@@ -137,7 +194,7 @@ export async function fetchOioQuotes(
   for (let i = 0; i < eventIds.length; i += 10) {
     const chunk = eventIds.slice(i, i + 10);
     const data = await getJson(
-      `${BASE}/odds/multi?apiKey=${apiKey()}&eventIds=${chunk.join(",")}` +
+      `${BASE}/odds/multi?eventIds=${chunk.join(",")}` +
         `&bookmakers=${encodeURIComponent(BOOKMAKER)}`
     );
     for (const ev of (Array.isArray(data) ? data : []) as {

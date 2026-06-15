@@ -136,7 +136,7 @@ export async function maybePlaceTipsterBets(
     const balance = (balanceOf.get(user.id) as { balance_points: number }).balance_points;
     const stake = stakeFor(tip.confidence, balance);
     if (stake === null) continue; // bankroll exhausted
-    const res = placeBet(user.id, tip.match_id, tip.market, tip.line, tip.selection, stake);
+    const res = await placeBet(user.id, tip.match_id, tip.market, tip.line, tip.selection, stake);
     if (res.bet) {
       linkBet.run(res.bet.id, tip.id);
       placed++;
@@ -148,7 +148,7 @@ export async function maybePlaceTipsterBets(
     const match = matchById.get(tip.match_id);
     const newLine = match ? nearestQuotedLine(match, tip) : null;
     if (newLine === null) continue; // nothing close enough — retry next pass
-    const retry = placeBet(user.id, tip.match_id, tip.market, newLine, tip.selection, stake);
+    const retry = await placeBet(user.id, tip.match_id, tip.market, newLine, tip.selection, stake);
     if (retry.bet) {
       db.prepare("UPDATE tips SET line = ?, label = ?, bet_id = ? WHERE id = ?").run(
         newLine,

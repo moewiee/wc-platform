@@ -59,6 +59,7 @@ export interface Bet {
   potential_payout_points: number;
   payout_points: number | null; // actual credit when settled
   status: BetStatus;
+  in_play: number; // 1 = struck after kickoff (live); display/audit only
   created_at: string;
   settled_at: string | null;
 }

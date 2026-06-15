@@ -59,10 +59,12 @@ function MatchRow({
   row,
   now,
   live,
+  inPlayBetting,
 }: {
   row: BoardRow;
   now: number;
   live?: LiveScore;
+  inPlayBetting: boolean;
 }) {
   const started = Date.parse(row.kickoff) <= now;
   const inPlay = row.status === "scheduled" && started;
@@ -161,15 +163,28 @@ function MatchRow({
         </>
       ) : (
         <div className="col-span-1 text-right text-xs text-slate-500 sm:col-span-4 sm:text-center">
-          {row.status === "void"
-            ? "VOID — stakes refunded"
-            : row.status === "finished"
-              ? row.homeScore !== null && row.homeScore !== row.awayScore
-                ? `FT · ${row.homeScore! > row.awayScore! ? row.home : row.away} won`
-                : "FT · Draw"
-              : started
-                ? "In play — counter closed"
-                : "Odds unavailable"}
+          {row.status === "void" ? (
+            "VOID — stakes refunded"
+          ) : row.status === "finished" ? (
+            row.homeScore !== null && row.homeScore !== row.awayScore ? (
+              `FT · ${row.homeScore! > row.awayScore! ? row.home : row.away} won`
+            ) : (
+              "FT · Draw"
+            )
+          ) : started ? (
+            inPlayBetting ? (
+              <Link
+                href={`/matches/${row.id}`}
+                className="font-semibold text-rose-400 hover:text-rose-300"
+              >
+                🔴 Bet live →
+              </Link>
+            ) : (
+              "In play — counter closed"
+            )
+          ) : (
+            "Odds unavailable"
+          )}
         </div>
       )}
     </div>
@@ -178,7 +193,13 @@ function MatchRow({
 
 // Bookmaker-style odds board grouped by the viewer's local date. Rendered
 // after mount so date grouping uses the browser timezone.
-export default function OddsBoard({ rows }: { rows: BoardRow[] }) {
+export default function OddsBoard({
+  rows,
+  inPlayBetting = true,
+}: {
+  rows: BoardRow[];
+  inPlayBetting?: boolean;
+}) {
   const [now, setNow] = useState<number | null>(null);
   useEffect(() => {
     setNow(Date.now());
@@ -250,7 +271,7 @@ export default function OddsBoard({ rows }: { rows: BoardRow[] }) {
             </div>
           </div>
           {dayRows.map((r) => (
-            <MatchRow key={r.id} row={r} now={now} live={live[r.id]} />
+            <MatchRow key={r.id} row={r} now={now} live={live[r.id]} inPlayBetting={inPlayBetting} />
           ))}
         </section>
       ))}

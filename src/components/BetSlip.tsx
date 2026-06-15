@@ -12,6 +12,7 @@ import { placeBetAction, type FormState } from "@/lib/actions";
 import {
   fmtOdds,
   fmtPts,
+  MAX_INPLAY_STAKE_PER_MATCH_POINTS,
   MAX_STAKE_PER_MATCH_POINTS,
   parseStakeToPoints,
   payoutPoints,
@@ -31,6 +32,12 @@ export interface SlipSelection {
   // markets — used to mirror the per-match stake cap. Undefined on surfaces
   // that don't track it (server enforcement still applies).
   matchCommittedPoints?: number;
+  // Of that, the points already staked in-play — mirrors the lower live
+  // sub-cap. Only meaningful when inPlay is true.
+  matchInPlayCommittedPoints?: number;
+  // True when this selection is a live (in-play) price: the slip sends the
+  // seen odds for the server's staleness check and shows in-play copy.
+  inPlay?: boolean;
 }
 
 interface SlipContext {
@@ -66,7 +73,10 @@ function BetSlipPanel({
 
   useEffect(() => {
     if (!slip) return;
-    const update = () => setClosedFor(Date.parse(slip.kickoff) <= Date.now());
+    // In-play selections aren't closed by kickoff; the server's live
+    // suspension check is authoritative for them.
+    const update = () =>
+      setClosedFor(!slip.inPlay && Date.parse(slip.kickoff) <= Date.now());
     update();
     const t = setInterval(update, 30_000);
     return () => clearInterval(t);
@@ -79,15 +89,39 @@ function BetSlipPanel({
     if (state.error || state.success) setConfirming(false);
   }, [state]);
 
+  // In-play re-quote: when the server reports the live price moved against the
+  // bettor, adopt the new price so the displayed odds, the hidden `odds` field
+  // and the projected payout all reflect it — and the next submit carries the
+  // accepted price instead of resending the stale one.
+  useEffect(() => {
+    if (state.newOdds !== undefined && slip && slip.odds !== state.newOdds) {
+      setSlip({ ...slip, odds: state.newOdds });
+    }
+  }, [state, slip, setSlip]);
+
   if (!slip) return null;
 
   const stakePts = parseStakeToPoints(stake);
   const projected = stakePts !== null ? payoutPoints(stakePts, slip.odds) : null;
   const committed = slip.matchCommittedPoints;
+  // In-play stakes face a lower sub-cap as well as the overall per-match cap;
+  // the binding remaining is the smaller of the two. Pre-match uses only the
+  // overall cap.
+  const capLabel = slip.inPlay
+    ? MAX_INPLAY_STAKE_PER_MATCH_POINTS
+    : MAX_STAKE_PER_MATCH_POINTS;
   const matchRemaining =
     committed === undefined
       ? null
-      : Math.max(0, MAX_STAKE_PER_MATCH_POINTS - committed);
+      : slip.inPlay
+        ? Math.max(
+            0,
+            Math.min(
+              MAX_STAKE_PER_MATCH_POINTS - committed,
+              MAX_INPLAY_STAKE_PER_MATCH_POINTS - (slip.matchInPlayCommittedPoints ?? 0)
+            )
+          )
+        : Math.max(0, MAX_STAKE_PER_MATCH_POINTS - committed);
   const overMatchLimit =
     matchRemaining !== null && stakePts !== null && stakePts > matchRemaining;
 
@@ -111,8 +145,17 @@ function BetSlipPanel({
           <input type="hidden" name="market" value={slip.market} />
           <input type="hidden" name="line" value={slip.line ?? ""} />
           <input type="hidden" name="selection" value={slip.selection} />
+          {/* In-play only: the price the bettor saw, for the server's staleness check. */}
+          <input type="hidden" name="odds" value={slip.inPlay ? slip.odds : ""} />
           <div>
-            <div className="text-xs text-slate-400">{slip.matchLabel}</div>
+            <div className="flex items-center gap-2 text-xs text-slate-400">
+              {slip.inPlay && (
+                <span className="rounded bg-rose-950 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-rose-400">
+                  Live
+                </span>
+              )}
+              {slip.matchLabel}
+            </div>
             <div className="mt-0.5 flex items-center justify-between gap-2">
               <span className="text-sm font-semibold text-slate-100">
                 {slip.marketName} · {slip.selectionLabel}
@@ -188,8 +231,8 @@ function BetSlipPanel({
               {matchRemaining !== null && (
                 <p className={`text-xs ${overMatchLimit ? "text-rose-400" : "text-slate-400"}`}>
                   {matchRemaining > 0
-                    ? `${fmtPts(matchRemaining)} of ${fmtPts(MAX_STAKE_PER_MATCH_POINTS)} pts per-match limit left on this match.`
-                    : `You've reached the ${fmtPts(MAX_STAKE_PER_MATCH_POINTS)} pts per-match limit on this match.`}
+                    ? `${fmtPts(matchRemaining)} of ${fmtPts(capLabel)} pts ${slip.inPlay ? "in-play" : "per-match"} limit left on this match.`
+                    : `You've reached the ${fmtPts(capLabel)} pts ${slip.inPlay ? "in-play" : "per-match"} limit on this match.`}
                 </p>
               )}
               {state.error && <p className="text-xs text-rose-400">{state.error}</p>}
@@ -239,9 +282,9 @@ function BetSlipPanel({
                       )}
                     </div>
                     <p className="mt-3 text-xs text-slate-400">
-                      Are you sure you want to place this bet? You can only
-                      cancel it within 30 minutes of placing it, and never
-                      after kickoff.
+                      {slip.inPlay
+                        ? "Are you sure? In-play bets are locked at this price the moment they're placed and can't be cancelled. The live price may move before this is accepted."
+                        : "Are you sure you want to place this bet? You can only cancel it within 30 minutes of placing it, and never after kickoff."}
                     </p>
                     <div className="mt-4 flex gap-2">
                       <button

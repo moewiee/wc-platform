@@ -1,10 +1,12 @@
 import { notFound } from "next/navigation";
+import LiveMarketBoard from "@/components/LiveMarketBoard";
 import LiveScore from "@/components/LiveScore";
 import LocalTime from "@/components/LocalTime";
 import MarketBoard from "@/components/MarketBoard";
 import TipsPanel from "@/components/TipsPanel";
 import { getCurrentUser } from "@/lib/auth";
 import { listUserBetsForMatch } from "@/lib/bets";
+import { inPlayEnabled } from "@/lib/live";
 import { marketsForMatch } from "@/lib/markets";
 import { getMatch, maybeRefreshOdds, oddsRefreshMinutes } from "@/lib/matches";
 import { fmtOdds, fmtPts } from "@/lib/money";
@@ -41,7 +43,14 @@ export default async function MatchPage({
   const committedPoints = myBets
     .filter((b) => b.status === "pending")
     .reduce((sum, b) => sum + b.stake_points, 0);
-  const markets = match.status === "scheduled" ? marketsForMatch(match) : [];
+  // In-play stakes only — mirrors the server's lower live sub-cap in the slip.
+  const inPlayCommittedPoints = myBets
+    .filter((b) => b.status === "pending" && b.in_play)
+    .reduce((sum, b) => sum + b.stake_points, 0);
+  const started = match.status === "scheduled" && Date.parse(match.kickoff) <= Date.now();
+  const live = started && inPlayEnabled();
+  // Only compute the pre-match sheet when the counter is still open.
+  const preMarkets = match.status === "scheduled" && !started ? marketsForMatch(match) : [];
 
   return (
     <div className="mx-auto max-w-4xl space-y-5">
@@ -79,24 +88,40 @@ export default async function MatchPage({
             Match voided — all stakes refunded.
           </div>
         )}
-        {match.odds_updated_at && match.status === "scheduled" && (
+        {match.status === "scheduled" && !started && match.odds_updated_at && (
           <div className="mt-3 text-xs text-slate-500">
             Odds {match.odds_source === "live" ? "from live bookmakers" : "house prices"} ·
             updated <LocalTime iso={match.odds_updated_at} /> · refreshed every{" "}
             {oddsRefreshMinutes()} min · counter closes at kickoff
           </div>
         )}
+        {match.status === "scheduled" && started && (
+          <div className="mt-3 text-xs text-rose-400">
+            {live
+              ? "🔴 In-play betting open — prices update with the match"
+              : "Counter closed — this match has kicked off"}
+          </div>
+        )}
       </div>
 
       <TipsPanel tips={tips} />
 
-      {match.status === "scheduled" && (
+      {match.status === "scheduled" && !started && (
         <MarketBoard
           matchId={match.id}
           matchLabel={`${match.home_team} vs ${match.away_team}`}
           kickoff={match.kickoff}
-          markets={markets}
+          markets={preMarkets}
           committedPoints={committedPoints}
+        />
+      )}
+      {match.status === "scheduled" && live && (
+        <LiveMarketBoard
+          matchId={match.id}
+          matchLabel={`${match.home_team} vs ${match.away_team}`}
+          kickoff={match.kickoff}
+          committedPoints={committedPoints}
+          inPlayCommittedPoints={inPlayCommittedPoints}
         />
       )}
 
