@@ -7,7 +7,7 @@ export const MAX_STAKE_PER_MATCH_POINTS = 2_000;
 // briefly know more than our model; this sub-cap bounds how much any single
 // in-play position (e.g. a goal snipe) can be worth. Counts in-play stakes
 // only; pre-match stakes still count toward MAX_STAKE_PER_MATCH_POINTS.
-export const MAX_INPLAY_STAKE_PER_MATCH_POINTS = 500;
+export const MAX_INPLAY_STAKE_PER_MATCH_POINTS = 1_000;
 
 // All balances/stakes/payouts are integer points.
 export function fmtPts(points: number): string {

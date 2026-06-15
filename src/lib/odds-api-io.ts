@@ -145,8 +145,11 @@ export function parseOioMarkets(feedMarkets: OioMarket[]): OioQuote[] {
   for (const [src, market] of AH_SOURCES) {
     for (const e of byName.get(src)?.odds ?? []) {
       const line = typeof e.hdp === "number" ? e.hdp : null; // home handicap
-      const home = dec(e.home);
-      const away = dec(e.away);
+      // Spread/Corners Spread quote the two sides as over/under (over = the
+      // home team covering the handicap, under = the away side); some books
+      // label them home/away instead — accept either shape.
+      const home = dec(e.home) ?? dec(e.over);
+      const away = dec(e.away) ?? dec(e.under);
       if (line === null || home === null || away === null) continue;
       put({ market, line, selection: "home", odds: home });
       put({ market, line, selection: "away", odds: away });
