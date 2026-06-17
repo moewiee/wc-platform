@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { marketsForMatch } from "./markets";
-import type { Bet, Match, User } from "./types";
+import type { Bet, Match, ParlayLegWithMatch, ParlayWithLegs, User } from "./types";
 
 export function apiError(status: number, message: string): NextResponse {
   return NextResponse.json({ error: message }, { status });
@@ -57,5 +57,38 @@ export function betPayload(bet: Bet) {
     in_play: !!bet.in_play,
     created_at: bet.created_at,
     settled_at: bet.settled_at,
+  };
+}
+
+function parlayLegPayload(leg: ParlayLegWithMatch) {
+  return {
+    leg_seq: leg.leg_seq,
+    match_id: leg.match_id,
+    home_team: leg.home_team,
+    away_team: leg.away_team,
+    kickoff: leg.kickoff,
+    market: leg.market,
+    line: leg.line,
+    selection: leg.selection,
+    label: leg.label,
+    odds: leg.odds,
+    leg_status: leg.leg_status,
+    match_status: leg.match_status,
+    home_score: leg.home_score,
+    away_score: leg.away_score,
+  };
+}
+
+export function parlayPayload(parlay: ParlayWithLegs) {
+  return {
+    id: parlay.id,
+    stake_points: parlay.stake_points,
+    combined_odds: parlay.combined_odds,
+    potential_payout_points: parlay.potential_payout_points,
+    payout_points: parlay.payout_points,
+    status: parlay.status,
+    created_at: parlay.created_at,
+    settled_at: parlay.settled_at,
+    legs: parlay.legs.map(parlayLegPayload),
   };
 }

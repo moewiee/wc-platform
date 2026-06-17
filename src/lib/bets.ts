@@ -18,15 +18,34 @@ import {
 } from "./live";
 import { fetchEspnCards } from "./espn";
 import {
+  combineOddsX1000,
   fmtPts,
   halfLosePayout,
   halfWinPayout,
   MAX_INPLAY_STAKE_PER_MATCH_POINTS,
+  MAX_PARLAY_LEGS,
+  MAX_PARLAY_PAYOUT_POINTS,
+  MAX_PARLAY_STAKE_POINTS,
   MAX_STAKE_PER_MATCH_POINTS,
+  MIN_PARLAY_LEGS,
   MIN_STAKE_POINTS,
+  parlayPayoutPoints,
   payoutPoints,
 } from "./money";
-import type { Bet, BetWithMatch, MarketType, Match, OpenBetRow, Pick3 } from "./types";
+import type {
+  Bet,
+  BetWithMatch,
+  LegStatus,
+  MarketType,
+  Match,
+  OpenBetRow,
+  Parlay,
+  ParlayLeg,
+  ParlayLegWithMatch,
+  ParlayStatus,
+  ParlayWithLegs,
+  Pick3,
+} from "./types";
 
 class BetError extends Error {}
 // Thrown when an in-play price has moved materially against the bettor since
@@ -54,13 +73,15 @@ function getBet(id: number): Bet | undefined {
 }
 
 // Adjust a user's balance and record the transaction. Must run inside a
-// db.transaction so balance and ledger never diverge.
+// db.transaction so balance and ledger never diverge. A ledger row is tied to
+// either a single bet (betId) or a parlay (parlayId), never both.
 function applyBalanceChange(
   userId: number,
   amountPoints: number,
   type: string,
   betId: number | null,
-  note: string
+  note: string,
+  parlayId: number | null = null
 ): number {
   const row = db
     .prepare("SELECT balance_points FROM users WHERE id = ?")
@@ -73,8 +94,8 @@ function applyBalanceChange(
     userId
   );
   db.prepare(
-    "INSERT INTO transactions (user_id, amount_points, balance_after_points, type, bet_id, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
-  ).run(userId, amountPoints, newBalance, type, betId, note, nowIso());
+    "INSERT INTO transactions (user_id, amount_points, balance_after_points, type, bet_id, parlay_id, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+  ).run(userId, amountPoints, newBalance, type, betId, parlayId, note, nowIso());
   return newBalance;
 }
 
@@ -127,16 +148,33 @@ function recordBet(
   return getBet(betId)!;
 }
 
-// Per-match open-stake cap across all markets (pre-match + in-play combined).
-// Throws if the new stake would breach it. Must run inside the transaction.
-function assertMatchCap(userId: number, matchId: number, stakePoints: number): void {
-  const existing = (
+// A player's open stake exposed on one match: single bets on it PLUS every
+// pending parlay that includes a leg on it (the full parlay stake is at risk on
+// each of its matches). Must run inside the transaction.
+function committedOnMatch(userId: number, matchId: number): number {
+  const betSum = (
     db
       .prepare(
         "SELECT COALESCE(SUM(stake_points), 0) AS total FROM bets WHERE user_id = ? AND match_id = ? AND status = 'pending'"
       )
       .get(userId, matchId) as { total: number }
   ).total;
+  const parlaySum = (
+    db
+      .prepare(
+        `SELECT COALESCE(SUM(p.stake_points), 0) AS total
+         FROM parlay_legs l JOIN parlays p ON p.id = l.parlay_id
+         WHERE p.user_id = ? AND l.match_id = ? AND p.status = 'pending'`
+      )
+      .get(userId, matchId) as { total: number }
+  ).total;
+  return betSum + parlaySum;
+}
+
+// Per-match open-stake cap across all markets (pre-match + in-play combined).
+// Throws if the new stake would breach it. Must run inside the transaction.
+function assertMatchCap(userId: number, matchId: number, stakePoints: number): void {
+  const existing = committedOnMatch(userId, matchId);
   if (existing + stakePoints > MAX_STAKE_PER_MATCH_POINTS) {
     const remaining = MAX_STAKE_PER_MATCH_POINTS - existing;
     throw new BetError(
@@ -264,6 +302,144 @@ function bookInPlay(
   }
 }
 
+// ── Parlay placement ─────────────────────────────────────────────────────────
+
+export interface ParlayLegInput {
+  matchId: number;
+  market: MarketType;
+  line: number | null;
+  selection: string;
+}
+
+export interface PlaceParlayResult {
+  parlay?: ParlayWithLegs;
+  error?: string;
+}
+
+// All legs of a parlay must kick off on the same day. Compared as the UTC date
+// prefix so the rule is deterministic and identical on client and server.
+export function utcDay(iso: string): string {
+  return new Date(iso).toISOString().slice(0, 10);
+}
+
+// Place a cross-match accumulator. Every leg is re-priced server-side (never
+// trust client odds) and the combined odds are the product of those real locked
+// quotes — no model. Rules: 2..MAX_PARLAY_LEGS legs, one leg per match
+// (correlation block), pre-match only, all on the same day, stake within limits.
+export async function placeParlay(
+  userId: number,
+  legs: ParlayLegInput[],
+  stakePoints: number
+): Promise<PlaceParlayResult> {
+  if (!Array.isArray(legs) || legs.length < MIN_PARLAY_LEGS) {
+    return { error: `A parlay needs at least ${MIN_PARLAY_LEGS} legs.` };
+  }
+  if (legs.length > MAX_PARLAY_LEGS) {
+    return { error: `A parlay can have at most ${MAX_PARLAY_LEGS} legs.` };
+  }
+  if (!Number.isInteger(stakePoints) || stakePoints < MIN_STAKE_POINTS) {
+    return { error: `Minimum stake is ${fmtPts(MIN_STAKE_POINTS)} pts.` };
+  }
+  if (stakePoints > MAX_PARLAY_STAKE_POINTS) {
+    return { error: `Maximum parlay stake is ${fmtPts(MAX_PARLAY_STAKE_POINTS)} pts.` };
+  }
+  // One leg per match — the load-bearing correlation block (same-match combos
+  // can't be priced from single-market quotes without a model).
+  const seen = new Set<number>();
+  for (const leg of legs) {
+    if (seen.has(leg.matchId)) {
+      return { error: "A parlay can't combine two selections from the same match." };
+    }
+    seen.add(leg.matchId);
+  }
+  // Up-front validation: every match scheduled, not yet started, all same day.
+  let day: string | null = null;
+  for (const leg of legs) {
+    const match = db
+      .prepare("SELECT * FROM matches WHERE id = ?")
+      .get(leg.matchId) as Match | undefined;
+    if (!match) return { error: "One of the matches no longer exists." };
+    if (match.status !== "scheduled" || Date.parse(match.kickoff) <= Date.now()) {
+      return { error: `Betting is closed for ${match.home_team} vs ${match.away_team}.` };
+    }
+    const d = utcDay(match.kickoff);
+    if (day === null) day = d;
+    else if (d !== day) {
+      return { error: "All legs of a parlay must kick off on the same day." };
+    }
+  }
+
+  try {
+    const parlay = db.transaction(() => {
+      const priced: { leg: ParlayLegInput; odds: number; label: string }[] = [];
+      for (const leg of legs) {
+        const match = db
+          .prepare("SELECT * FROM matches WHERE id = ?")
+          .get(leg.matchId) as Match;
+        if (match.status !== "scheduled" || Date.parse(match.kickoff) <= Date.now()) {
+          throw new BetError(
+            `Betting is closed for ${match.home_team} vs ${match.away_team}.`
+          );
+        }
+        // The full parlay stake is at risk on each leg's match — count it
+        // against the per-match cap, same as a single bet would.
+        assertMatchCap(userId, leg.matchId, stakePoints);
+        // Re-price from the server-side market model — never trust client odds.
+        const offer = findSelection(match, leg.market, leg.line, leg.selection);
+        if (!offer) {
+          throw new BetError(
+            `A selection isn't available right now (${match.home_team} vs ${match.away_team}). Remove it and try again.`
+          );
+        }
+        priced.push({ leg, odds: offer.odds, label: offer.label });
+      }
+      const legOdds = priced.map((p) => p.odds);
+      const combined = combineOddsX1000(legOdds);
+      const potential = parlayPayoutPoints(
+        stakePoints,
+        legOdds,
+        MAX_PARLAY_PAYOUT_POINTS
+      );
+      const info = db
+        .prepare(
+          `INSERT INTO parlays (user_id, stake_points, combined_odds, potential_payout_points, status, created_at)
+           VALUES (?, ?, ?, ?, 'pending', ?)`
+        )
+        .run(userId, stakePoints, combined, potential, nowIso());
+      const parlayId = Number(info.lastInsertRowid);
+      const insertLeg = db.prepare(
+        `INSERT INTO parlay_legs (parlay_id, leg_seq, match_id, market, line, selection, label, odds, leg_status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')`
+      );
+      priced.forEach((p, i) => {
+        insertLeg.run(
+          parlayId,
+          i + 1,
+          p.leg.matchId,
+          p.leg.market,
+          p.leg.line,
+          p.leg.selection,
+          p.label,
+          p.odds
+        );
+      });
+      applyBalanceChange(
+        userId,
+        -stakePoints,
+        "parlay_stake",
+        null,
+        `Parlay: ${priced.length} legs @ ${(combined / 1000).toFixed(2)}`,
+        parlayId
+      );
+      return getUserParlay(userId, parlayId)!;
+    })();
+    return { parlay };
+  } catch (e) {
+    if (e instanceof BetError) return { error: e.message };
+    throw e;
+  }
+}
+
 export function cancelBet(userId: number, betId: number): { error?: string } {
   try {
     db.transaction(() => {
@@ -353,6 +529,108 @@ function resolveBet(bet: Bet, d: ResultData, context: string): boolean {
   return true;
 }
 
+// ── Parlay settlement ────────────────────────────────────────────────────────
+
+// Per-leg contribution to the parlay payout, x1000 (mirrors the single-bet
+// money math). `null` means the leg fully lost, so the whole parlay loses.
+function legFactorX1000(status: LegStatus, oddsX1000: number): number | null {
+  switch (status) {
+    case "win":
+      return oddsX1000;
+    case "push":
+      return 1000; // 1.000 — drops out, recompute on the rest
+    case "half_win":
+      return Math.floor((1000 + oddsX1000) / 2);
+    case "half_lose":
+      return 500; // 0.500
+    case "lose":
+      return null;
+    default:
+      return 1000; // 'pending' never reaches here
+  }
+}
+
+// Re-evaluate one parlay after a leg changed. Lost the instant any leg loses
+// (early locked loss); paid only once every leg is terminal and none lost.
+// Caller must run inside a transaction. Guards on status so it never double-pays.
+function reevaluateParlay(parlayId: number): void {
+  const p = db.prepare("SELECT * FROM parlays WHERE id = ?").get(parlayId) as
+    | Parlay
+    | undefined;
+  if (!p || p.status !== "pending") return;
+  const legs = db
+    .prepare("SELECT * FROM parlay_legs WHERE parlay_id = ?")
+    .all(parlayId) as ParlayLeg[];
+  if (legs.some((l) => l.leg_status === "lose")) {
+    db.prepare(
+      "UPDATE parlays SET status = 'lost', payout_points = 0, settled_at = ? WHERE id = ?"
+    ).run(nowIso(), parlayId);
+    return;
+  }
+  if (legs.some((l) => l.leg_status === "pending")) return; // wait for the rest
+  // Every leg is terminal and none lost.
+  const factors = legs.map((l) => legFactorX1000(l.leg_status, l.odds)!);
+  const allPush = legs.every((l) => l.leg_status === "push");
+  const payout = parlayPayoutPoints(
+    p.stake_points,
+    factors,
+    MAX_PARLAY_PAYOUT_POINTS
+  );
+  const status: ParlayStatus = allPush ? "void" : "won";
+  db.prepare(
+    "UPDATE parlays SET status = ?, payout_points = ?, settled_at = ? WHERE id = ?"
+  ).run(status, payout, nowIso(), parlayId);
+  if (payout > 0) {
+    applyBalanceChange(
+      p.user_id,
+      payout,
+      status === "void" ? "parlay_refund" : "parlay_payout",
+      null,
+      `${status === "void" ? "Parlay void (all legs pushed)" : "Parlay won"}: ${legs.length} legs`,
+      parlayId
+    );
+  }
+}
+
+// Settle every pending parlay leg on a just-resolved match, then re-evaluate
+// each affected parlay. Caller must run inside a transaction. Legs that can't be
+// graded yet (e.g. corners/cards unknown) stay pending until completeMatchData.
+function settleParlayLegsForMatch(matchId: number, d: ResultData): void {
+  const legs = db
+    .prepare(
+      "SELECT * FROM parlay_legs WHERE match_id = ? AND leg_status = 'pending'"
+    )
+    .all(matchId) as ParlayLeg[];
+  const affected = new Set<number>();
+  for (const leg of legs) {
+    const outcome = settleSelection(leg.market, leg.line, leg.selection, d);
+    if (outcome === "pending") continue;
+    db.prepare(
+      "UPDATE parlay_legs SET leg_status = ?, settled_at = ? WHERE id = ?"
+    ).run(outcome, nowIso(), leg.id);
+    affected.add(leg.parlay_id);
+  }
+  for (const pid of affected) reevaluateParlay(pid);
+}
+
+// A voided match (postponed) drops its parlay legs at odds 1.000 (push) and the
+// parlay recomputes on the rest. Caller must run inside a transaction.
+function voidParlayLegsForMatch(matchId: number): void {
+  const legs = db
+    .prepare(
+      "SELECT * FROM parlay_legs WHERE match_id = ? AND leg_status = 'pending'"
+    )
+    .all(matchId) as ParlayLeg[];
+  const affected = new Set<number>();
+  for (const leg of legs) {
+    db.prepare(
+      "UPDATE parlay_legs SET leg_status = 'push', settled_at = ? WHERE id = ?"
+    ).run(nowIso(), leg.id);
+    affected.add(leg.parlay_id);
+  }
+  for (const pid of affected) reevaluateParlay(pid);
+}
+
 export interface MatchResultInput {
   homeScore: number;
   awayScore: number;
@@ -429,6 +707,7 @@ export function settleMatch(
       for (const bet of pending) {
         if (resolveBet(bet, d, context)) settled++;
       }
+      settleParlayLegsForMatch(matchId, d);
       return settled;
     })();
     return { settledBets };
@@ -480,6 +759,7 @@ export function completeMatchData(
       for (const bet of pending) {
         if (resolveBet(bet, d, context)) settled++;
       }
+      settleParlayLegsForMatch(matchId, d);
       return settled;
     })();
     return { settledBets };
@@ -524,10 +804,18 @@ export async function maybeEarlyResolve(): Promise<{ resolved: number }> {
         `SELECT * FROM bets WHERE match_id = ? AND status = 'pending' AND market IN (${placeholders})`
       )
       .all(m.id, ...EARLY_RESOLVE_MARKETS) as Bet[];
-    if (pending.length === 0) continue;
-    // Live card total only when a card bet is open and we have an ESPN id.
+    const pendingLegs = db
+      .prepare(
+        `SELECT * FROM parlay_legs WHERE match_id = ? AND leg_status = 'pending' AND market IN (${placeholders})`
+      )
+      .all(m.id, ...EARLY_RESOLVE_MARKETS) as ParlayLeg[];
+    if (pending.length === 0 && pendingLegs.length === 0) continue;
+    // Live card total only when a card market is open and we have an ESPN id.
     let cardsTotal: number | null = null;
-    if (pending.some((b) => b.market === "ou_cards") && m.api_id?.startsWith("espn:")) {
+    const needCards =
+      pending.some((b) => b.market === "ou_cards") ||
+      pendingLegs.some((l) => l.market === "ou_cards");
+    if (needCards && m.api_id?.startsWith("espn:")) {
       cardsTotal = await fetchEspnCards(m.api_id.slice(5)).catch(() => null);
     }
     const tallies = {
@@ -554,6 +842,24 @@ export async function maybeEarlyResolve(): Promise<{ resolved: number }> {
             "UPDATE bets SET status = 'lost', payout_points = 0, settled_at = ? WHERE id = ?"
           ).run(nowIso(), fresh.id);
         }
+        return true;
+      })();
+      if (didResolve) resolved++;
+    }
+    // Parlay legs: a locked win marks just that leg won (the parlay waits on its
+    // other legs); a locked loss settles the whole parlay as lost immediately.
+    for (const leg of pendingLegs) {
+      const outcome = lockedOutcome(leg.market, leg.line, leg.selection, tallies);
+      if (!outcome) continue;
+      const didResolve = db.transaction(() => {
+        const fresh = db
+          .prepare("SELECT leg_status FROM parlay_legs WHERE id = ?")
+          .get(leg.id) as { leg_status: LegStatus } | undefined;
+        if (!fresh || fresh.leg_status !== "pending") return false; // raced
+        db.prepare(
+          "UPDATE parlay_legs SET leg_status = ?, settled_at = ? WHERE id = ?"
+        ).run(outcome === "won" ? "win" : "lose", nowIso(), leg.id);
+        reevaluateParlay(leg.parlay_id);
         return true;
       })();
       if (didResolve) resolved++;
@@ -589,6 +895,7 @@ export function voidMatch(matchId: number): { error?: string; refunded?: number 
           `Voided: ${match.home_team} vs ${match.away_team}`
         );
       }
+      voidParlayLegsForMatch(matchId);
       return pending.length;
     })();
     return { refunded };
@@ -651,4 +958,92 @@ export function countPendingBets(matchId: number): number {
       )
       .get(matchId) as { n: number }
   ).n;
+}
+
+// ── Parlay cancel & listing ──────────────────────────────────────────────────
+
+export function cancelParlay(userId: number, parlayId: number): { error?: string } {
+  try {
+    db.transaction(() => {
+      const p = db
+        .prepare("SELECT * FROM parlays WHERE id = ? AND user_id = ?")
+        .get(parlayId, userId) as Parlay | undefined;
+      if (!p) throw new BetError("Parlay not found.");
+      if (p.status !== "pending") {
+        throw new BetError("Only open parlays can be cancelled.");
+      }
+      const legs = db
+        .prepare(
+          `SELECT m.status AS match_status, m.kickoff
+           FROM parlay_legs l JOIN matches m ON m.id = l.match_id
+           WHERE l.parlay_id = ?`
+        )
+        .all(parlayId) as { match_status: string; kickoff: string }[];
+      for (const leg of legs) {
+        if (leg.match_status !== "scheduled" || Date.parse(leg.kickoff) <= Date.now()) {
+          throw new BetError("Too late to cancel — one of the matches has started.");
+        }
+      }
+      if (Date.parse(p.created_at) + CANCEL_WINDOW_MS <= Date.now()) {
+        throw new BetError(
+          "Too late to cancel — parlays can only be cancelled within 30 minutes of placing them."
+        );
+      }
+      db.prepare(
+        "UPDATE parlays SET status = 'cancelled', payout_points = ?, settled_at = ? WHERE id = ?"
+      ).run(p.stake_points, nowIso(), p.id);
+      applyBalanceChange(
+        userId,
+        p.stake_points,
+        "parlay_refund",
+        null,
+        `Cancelled parlay (${legs.length} legs)`,
+        p.id
+      );
+    })();
+    return {};
+  } catch (e) {
+    if (e instanceof BetError) return { error: e.message };
+    throw e;
+  }
+}
+
+const PARLAY_LEGS_WITH_MATCH = `
+  SELECT l.*, m.home_team, m.away_team, m.kickoff,
+         m.status AS match_status, m.home_score, m.away_score
+  FROM parlay_legs l JOIN matches m ON m.id = l.match_id
+`;
+
+export function listUserParlays(userId: number): ParlayWithLegs[] {
+  const parlays = db
+    .prepare("SELECT * FROM parlays WHERE user_id = ? ORDER BY created_at DESC, id DESC")
+    .all(userId) as Parlay[];
+  if (parlays.length === 0) return [];
+  const ph = parlays.map(() => "?").join(",");
+  const legs = db
+    .prepare(
+      `${PARLAY_LEGS_WITH_MATCH} WHERE l.parlay_id IN (${ph}) ORDER BY l.parlay_id, l.leg_seq`
+    )
+    .all(...parlays.map((p) => p.id)) as ParlayLegWithMatch[];
+  const byParlay = new Map<number, ParlayLegWithMatch[]>();
+  for (const l of legs) {
+    const arr = byParlay.get(l.parlay_id);
+    if (arr) arr.push(l);
+    else byParlay.set(l.parlay_id, [l]);
+  }
+  return parlays.map((p) => ({ ...p, legs: byParlay.get(p.id) ?? [] }));
+}
+
+export function getUserParlay(
+  userId: number,
+  parlayId: number
+): ParlayWithLegs | undefined {
+  const p = db
+    .prepare("SELECT * FROM parlays WHERE id = ? AND user_id = ?")
+    .get(parlayId, userId) as Parlay | undefined;
+  if (!p) return undefined;
+  const legs = db
+    .prepare(`${PARLAY_LEGS_WITH_MATCH} WHERE l.parlay_id = ? ORDER BY l.leg_seq`)
+    .all(parlayId) as ParlayLegWithMatch[];
+  return { ...p, legs };
 }

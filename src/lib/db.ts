@@ -117,6 +117,37 @@ function migrate(db: Database.Database) {
       corners_home INTEGER,
       corners_away INTEGER
     );
+    -- Cross-match accumulators (parlays). A parent row holds the combined stake
+    -- and the locked combined odds (product of the legs' real quotes); the legs
+    -- carry one real selection each. Same-game combos are blocked (correlation
+    -- can't be priced from single-market quotes), enforced by the unique index
+    -- on (parlay_id, match_id) plus a check in placeParlay.
+    CREATE TABLE IF NOT EXISTS parlays (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      stake_points INTEGER NOT NULL CHECK (stake_points > 0),
+      combined_odds INTEGER NOT NULL CHECK (combined_odds > 1000),
+      potential_payout_points INTEGER NOT NULL,
+      payout_points INTEGER,
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending','won','lost','void','cancelled')),
+      created_at TEXT NOT NULL,
+      settled_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS parlay_legs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      parlay_id INTEGER NOT NULL REFERENCES parlays(id),
+      leg_seq INTEGER NOT NULL,
+      match_id INTEGER NOT NULL REFERENCES matches(id),
+      market TEXT NOT NULL,
+      line REAL,
+      selection TEXT NOT NULL,
+      label TEXT NOT NULL,
+      odds INTEGER NOT NULL CHECK (odds > 1000),
+      leg_status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (leg_status IN ('pending','win','lose','push','half_win','half_lose')),
+      settled_at TEXT
+    );
     CREATE INDEX IF NOT EXISTS idx_bets_user ON bets(user_id);
     CREATE INDEX IF NOT EXISTS idx_bets_match ON bets(match_id);
     CREATE INDEX IF NOT EXISTS idx_txns_user ON transactions(user_id);
@@ -124,6 +155,11 @@ function migrate(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
     CREATE INDEX IF NOT EXISTS idx_tips_match ON tips(match_id);
     CREATE INDEX IF NOT EXISTS idx_market_odds_match ON market_odds(match_id);
+    CREATE INDEX IF NOT EXISTS idx_parlays_user ON parlays(user_id);
+    CREATE INDEX IF NOT EXISTS idx_parlay_legs_parlay ON parlay_legs(parlay_id);
+    CREATE INDEX IF NOT EXISTS idx_parlay_legs_match ON parlay_legs(match_id, leg_status);
+    -- One leg per match: the load-bearing correlation block at the DB level.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_parlay_legs_unique_match ON parlay_legs(parlay_id, match_id);
   `);
   // Added after launch: odds-api.io event id for the per-market odds sync.
   const matchCols = db.prepare("PRAGMA table_info(matches)").all() as { name: string }[];
@@ -150,6 +186,11 @@ function migrate(db: Database.Database) {
   const moCols = db.prepare("PRAGMA table_info(market_odds)").all() as { name: string }[];
   if (!moCols.some((c) => c.name === "in_play")) {
     db.exec("ALTER TABLE market_odds ADD COLUMN in_play INTEGER NOT NULL DEFAULT 0");
+  }
+  // Added after launch: ties a ledger row to the parlay (vs single bet) it came from.
+  const txnCols = db.prepare("PRAGMA table_info(transactions)").all() as { name: string }[];
+  if (!txnCols.some((c) => c.name === "parlay_id")) {
+    db.exec("ALTER TABLE transactions ADD COLUMN parlay_id INTEGER");
   }
   // Added after launch: live corner counts, for early-resolving corner O/U.
   const lsCols = db.prepare("PRAGMA table_info(live_state)").all() as { name: string }[];

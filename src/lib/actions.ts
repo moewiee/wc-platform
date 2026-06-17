@@ -12,10 +12,13 @@ import {
 } from "./auth";
 import {
   cancelBet,
+  cancelParlay,
   completeMatchData,
   placeBet,
+  placeParlay,
   settleMatch,
   voidMatch,
+  type ParlayLegInput,
 } from "./bets";
 import { maybeRefreshMarketOdds, maybeRefreshOdds, maybeSyncScores } from "./matches";
 import { fmtOdds, fmtPts, parseStakeToPoints } from "./money";
@@ -118,6 +121,64 @@ export async function cancelBetAction(
   if (res.error) return { error: res.error };
   revalidatePath("/", "layout");
   return { success: "Bet cancelled — stake refunded." };
+}
+
+export async function placeParlayAction(
+  _prev: FormState,
+  formData: FormData
+): Promise<FormState> {
+  const user = await getCurrentUser();
+  if (!user) redirect("/login");
+  const stake = parseStakeToPoints(String(formData.get("stake") ?? ""));
+  if (stake === null) return { error: "Enter a whole number of points, e.g. 100." };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(String(formData.get("legs") ?? "[]"));
+  } catch {
+    return { error: "Could not read the parlay selections." };
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    return { error: "Add at least two selections to a parlay." };
+  }
+  const legs: ParlayLegInput[] = [];
+  for (const raw of parsed as Array<Record<string, unknown>>) {
+    const matchId = Number(raw.matchId);
+    const market = String(raw.market ?? "");
+    const lineRaw = raw.line;
+    const line =
+      lineRaw === null || lineRaw === undefined || lineRaw === ""
+        ? null
+        : Number(lineRaw);
+    const selection = String(raw.selection ?? "");
+    if (!Number.isInteger(matchId) || !MARKETS.has(market) || !selection) {
+      return { error: "One of the parlay selections is invalid." };
+    }
+    if (line !== null && !Number.isFinite(line)) {
+      return { error: "One of the parlay lines is invalid." };
+    }
+    legs.push({ matchId, market: market as MarketType, line, selection });
+  }
+  const res = await placeParlay(user.id, legs, stake);
+  if (!res.parlay) return { error: res.error ?? "Could not place the parlay." };
+  revalidatePath("/", "layout");
+  const p = res.parlay;
+  return {
+    success: `Parlay placed: ${p.legs.length} legs at ${fmtOdds(p.combined_odds)} — ${fmtPts(p.stake_points)} pts to win ${fmtPts(p.potential_payout_points)} pts.`,
+  };
+}
+
+export async function cancelParlayAction(
+  _prev: FormState,
+  formData: FormData
+): Promise<FormState> {
+  const user = await getCurrentUser();
+  if (!user) redirect("/login");
+  const parlayId = Number(formData.get("parlayId"));
+  if (!Number.isInteger(parlayId)) return { error: "Invalid parlay." };
+  const res = cancelParlay(user.id, parlayId);
+  if (res.error) return { error: res.error };
+  revalidatePath("/", "layout");
+  return { success: "Parlay cancelled — stake refunded." };
 }
 
 export async function changePasswordAction(

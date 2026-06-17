@@ -12,6 +12,16 @@ export type MarketType = (typeof MARKET_TYPES)[number];
 
 export type MatchStatus = "scheduled" | "finished" | "void";
 export type BetStatus = "pending" | "won" | "lost" | "void" | "cancelled";
+export type ParlayStatus = BetStatus;
+// Per-leg settlement state — mirrors SettleOutcome (markets.ts) exactly, so a
+// leg can store the outcome verbatim.
+export type LegStatus =
+  | "pending"
+  | "win"
+  | "lose"
+  | "push"
+  | "half_win"
+  | "half_lose";
 export type Pick3 = "home" | "draw" | "away";
 
 export interface User {
@@ -85,8 +95,52 @@ export interface Txn {
   balance_after_points: number;
   type: string;
   bet_id: number | null;
+  parlay_id: number | null;
   note: string | null;
   created_at: string;
+}
+
+// Cross-match accumulator. Combined odds are the product of the legs' real
+// locked quotes (never modelled). All-or-nothing: any losing leg loses the
+// ticket; void/push legs collapse to odds 1.000 and the parlay recomputes on
+// the rest.
+export interface Parlay {
+  id: number;
+  user_id: number;
+  stake_points: number;
+  combined_odds: number; // decimal odds x1000, product of the legs, locked
+  potential_payout_points: number;
+  payout_points: number | null;
+  status: ParlayStatus;
+  created_at: string;
+  settled_at: string | null;
+}
+
+export interface ParlayLeg {
+  id: number;
+  parlay_id: number;
+  leg_seq: number;
+  match_id: number;
+  market: MarketType;
+  line: number | null;
+  selection: string;
+  label: string;
+  odds: number; // decimal odds x1000, locked at placement
+  leg_status: LegStatus;
+  settled_at: string | null;
+}
+
+export interface ParlayLegWithMatch extends ParlayLeg {
+  home_team: string;
+  away_team: string;
+  kickoff: string;
+  match_status: MatchStatus;
+  home_score: number | null;
+  away_score: number | null;
+}
+
+export interface ParlayWithLegs extends Parlay {
+  legs: ParlayLegWithMatch[];
 }
 
 export interface LeaderboardRow {

@@ -16,18 +16,13 @@ export default function OddsButton({
   disabled?: boolean;
   wide?: boolean;
 }) {
-  const { slip, setSlip } = useBetSlip();
-  const active =
-    slip !== null &&
-    slip.matchId === sel.matchId &&
-    slip.market === sel.market &&
-    slip.selection === sel.selection &&
-    slip.line === sel.line;
+  const { isSelected, toggle } = useBetSlip();
+  const active = isSelected(sel);
   return (
     <button
       type="button"
       disabled={disabled}
-      onClick={() => setSlip(active ? null : sel)}
+      onClick={() => toggle(sel)}
       title={`${sel.marketName} · ${sel.selectionLabel}`}
       className={`flex flex-col items-center justify-center rounded-md border px-1.5 py-1 transition ${
         wide ? "w-full" : "w-[4.5rem]"
