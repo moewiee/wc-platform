@@ -29,6 +29,8 @@ import {
   MAX_STAKE_PER_MATCH_POINTS,
   MIN_PARLAY_LEGS,
   MIN_STAKE_POINTS,
+  effectiveParlayStake,
+  parlayDayKey,
   parlayPayoutPoints,
   payoutPoints,
 } from "./money";
@@ -316,12 +318,6 @@ export interface PlaceParlayResult {
   error?: string;
 }
 
-// All legs of a parlay must kick off on the same day. Compared as the UTC date
-// prefix so the rule is deterministic and identical on client and server.
-export function utcDay(iso: string): string {
-  return new Date(iso).toISOString().slice(0, 10);
-}
-
 // Place a cross-match accumulator. Every leg is re-priced server-side (never
 // trust client odds) and the combined odds are the product of those real locked
 // quotes — no model. Rules: 2..MAX_PARLAY_LEGS legs, one leg per match
@@ -362,7 +358,7 @@ export async function placeParlay(
     if (match.status !== "scheduled" || Date.parse(match.kickoff) <= Date.now()) {
       return { error: `Betting is closed for ${match.home_team} vs ${match.away_team}.` };
     }
-    const d = utcDay(match.kickoff);
+    const d = parlayDayKey(match.kickoff);
     if (day === null) day = d;
     else if (d !== day) {
       return { error: "All legs of a parlay must kick off on the same day." };
@@ -381,9 +377,6 @@ export async function placeParlay(
             `Betting is closed for ${match.home_team} vs ${match.away_team}.`
           );
         }
-        // The full parlay stake is at risk on each leg's match — count it
-        // against the per-match cap, same as a single bet would.
-        assertMatchCap(userId, leg.matchId, stakePoints);
         // Re-price from the server-side market model — never trust client odds.
         const offer = findSelection(match, leg.market, leg.line, leg.selection);
         if (!offer) {
@@ -395,8 +388,20 @@ export async function placeParlay(
       }
       const legOdds = priced.map((p) => p.odds);
       const combined = combineOddsX1000(legOdds);
-      const potential = parlayPayoutPoints(
+      // Auto-reduce the stake when the all-win payout would exceed the cap, so a
+      // capped payout never just eats the bettor's profit — they stake only what
+      // earns the max payout and keep the rest.
+      const stake = effectiveParlayStake(
         stakePoints,
+        combined,
+        MAX_PARLAY_PAYOUT_POINTS,
+        MIN_STAKE_POINTS
+      );
+      // The full (effective) parlay stake is at risk on each leg's match — count
+      // it against the per-match cap, same as a single bet would.
+      for (const p of priced) assertMatchCap(userId, p.leg.matchId, stake);
+      const potential = parlayPayoutPoints(
+        stake,
         legOdds,
         MAX_PARLAY_PAYOUT_POINTS
       );
@@ -405,7 +410,7 @@ export async function placeParlay(
           `INSERT INTO parlays (user_id, stake_points, combined_odds, potential_payout_points, status, created_at)
            VALUES (?, ?, ?, ?, 'pending', ?)`
         )
-        .run(userId, stakePoints, combined, potential, nowIso());
+        .run(userId, stake, combined, potential, nowIso());
       const parlayId = Number(info.lastInsertRowid);
       const insertLeg = db.prepare(
         `INSERT INTO parlay_legs (parlay_id, leg_seq, match_id, market, line, selection, label, odds, leg_status)
@@ -425,7 +430,7 @@ export async function placeParlay(
       });
       applyBalanceChange(
         userId,
-        -stakePoints,
+        -stake,
         "parlay_stake",
         null,
         `Parlay: ${priced.length} legs @ ${(combined / 1000).toFixed(2)}`,

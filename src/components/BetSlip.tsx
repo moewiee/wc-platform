@@ -16,6 +16,7 @@ import {
 } from "@/lib/actions";
 import {
   combineOddsX1000,
+  effectiveParlayStake,
   fmtOdds,
   fmtPts,
   MAX_INPLAY_STAKE_PER_MATCH_POINTS,
@@ -24,6 +25,8 @@ import {
   MAX_PARLAY_STAKE_POINTS,
   MAX_STAKE_PER_MATCH_POINTS,
   MIN_PARLAY_LEGS,
+  MIN_STAKE_POINTS,
+  parlayDayKey,
   parlayPayoutPoints,
   parseStakeToPoints,
   payoutPoints,
@@ -55,11 +58,6 @@ type SlipMode = "single" | "parlay";
 
 function selKey(s: SlipSelection): string {
   return `${s.matchId}:${s.market}:${s.line ?? ""}:${s.selection}`;
-}
-
-// Same-day rule, computed as the UTC date prefix so it matches the server.
-function dayKey(iso: string): string {
-  return new Date(iso).toISOString().slice(0, 10);
 }
 
 interface SlipContext {
@@ -364,14 +362,22 @@ function ParlayBody({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [JSON.stringify(legOdds)]
   );
-  const projected =
+  // If the all-win payout would exceed the cap, the stake is auto-reduced so the
+  // bettor keeps the leftover rather than over-staking for a clipped payout.
+  const effStake =
     stakePts !== null
-      ? parlayPayoutPoints(stakePts, legOdds, MAX_PARLAY_PAYOUT_POINTS)
+      ? effectiveParlayStake(
+          stakePts,
+          combinedOdds,
+          MAX_PARLAY_PAYOUT_POINTS,
+          MIN_STAKE_POINTS
+        )
       : null;
-  const capped =
-    stakePts !== null &&
-    parlayPayoutPoints(stakePts, legOdds, Number.MAX_SAFE_INTEGER) >
-      MAX_PARLAY_PAYOUT_POINTS;
+  const reduced = stakePts !== null && effStake !== null && effStake < stakePts;
+  const projected =
+    effStake !== null
+      ? parlayPayoutPoints(effStake, legOdds, MAX_PARLAY_PAYOUT_POINTS)
+      : null;
 
   const anyStarted = selections.some((s) => Date.parse(s.kickoff) <= now);
   const tooFew = selections.length < MIN_PARLAY_LEGS;
@@ -486,11 +492,13 @@ function ParlayBody({
               <span className="font-mono font-bold text-emerald-400">
                 {fmtPts(projected)} pts
               </span>
-              {capped && (
-                <span className="ml-1 text-amber-400">
-                  (capped at {fmtPts(MAX_PARLAY_PAYOUT_POINTS)})
-                </span>
-              )}
+            </p>
+          )}
+          {reduced && effStake !== null && stakePts !== null && (
+            <p className="text-xs text-amber-400">
+              Max payout is {fmtPts(MAX_PARLAY_PAYOUT_POINTS)} pts — stake
+              auto-reduced to {fmtPts(effStake)} pts; you keep the other{" "}
+              {fmtPts(stakePts - effStake)} pts.
             </p>
           )}
           {tooFew && (
@@ -564,8 +572,13 @@ function ParlayBody({
                   <p className="text-slate-300">
                     Stake:{" "}
                     <span className="font-mono font-bold">
-                      {fmtPts(stakePts ?? 0)} pts
+                      {fmtPts(effStake ?? stakePts ?? 0)} pts
                     </span>
+                    {reduced && (
+                      <span className="ml-1 text-xs text-amber-400">
+                        (reduced from {fmtPts(stakePts ?? 0)} for the payout cap)
+                      </span>
+                    )}
                   </p>
                   {projected !== null && (
                     <p className="text-slate-300">
@@ -717,7 +730,10 @@ export default function BetSlipProvider({
       setError("Can't combine two legs from the same match.");
       return;
     }
-    if (selections.length > 0 && dayKey(s.kickoff) !== dayKey(selections[0].kickoff)) {
+    if (
+      selections.length > 0 &&
+      parlayDayKey(s.kickoff) !== parlayDayKey(selections[0].kickoff)
+    ) {
       setError("All legs must kick off on the same day.");
       return;
     }

@@ -18,6 +18,18 @@ export const MAX_PARLAY_LEGS = 6;
 export const MAX_PARLAY_STAKE_POINTS = 500;
 export const MAX_PARLAY_PAYOUT_POINTS = 5_000;
 
+// The friends' local matchday for the "all legs same day" parlay rule. The
+// group is in GMT+7 (no DST), so shifting the instant +7h and taking the UTC
+// date yields the local calendar day. Used identically on client and server so
+// the two never disagree (kickoffs are stored as UTC, but a late-UTC match can
+// be the same *local* matchday as an early-next-UTC-day one).
+export const PARLAY_DAY_OFFSET_MINUTES = 7 * 60;
+export function parlayDayKey(iso: string): string {
+  return new Date(Date.parse(iso) + PARLAY_DAY_OFFSET_MINUTES * 60_000)
+    .toISOString()
+    .slice(0, 10);
+}
+
 // All balances/stakes/payouts are integer points.
 export function fmtPts(points: number): string {
   return points.toLocaleString("en-US");
@@ -53,6 +65,22 @@ export function combineOddsX1000(legOddsX1000: number[]): number {
   for (const o of legOddsX1000) num *= BigInt(o);
   const den = 1000n ** BigInt(legOddsX1000.length - 1);
   return Number(num / den);
+}
+
+// When a parlay's all-win payout would exceed the cap, reduce the stake so the
+// bettor pays only for the capped return (and keeps the leftover) instead of
+// over-staking for a clipped payout. Returns the stake actually taken: the
+// requested stake, or the largest stake whose payout still fits the cap, but
+// never below the minimum (if the odds are so long even the min stake hits the
+// cap, the cap then applies to that min-stake bet). Shared client + server.
+export function effectiveParlayStake(
+  requestedStake: number,
+  combinedOddsX1000: number,
+  capPoints: number,
+  minStake: number
+): number {
+  const maxForCap = Math.floor((capPoints * 1000) / combinedOddsX1000);
+  return Math.max(minStake, Math.min(requestedStake, maxForCap));
 }
 
 // Parlay payout = floor(stake · Π(factor_i / 1000)), capped. Each `factor` is a
