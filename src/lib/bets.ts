@@ -41,6 +41,7 @@ import type {
   MarketType,
   Match,
   OpenBetRow,
+  OpenParlayRow,
   Parlay,
   ParlayLeg,
   ParlayLegWithMatch,
@@ -1023,6 +1024,33 @@ export function listUserParlays(userId: number): ParlayWithLegs[] {
   const parlays = db
     .prepare("SELECT * FROM parlays WHERE user_id = ? ORDER BY created_at DESC, id DESC")
     .all(userId) as Parlay[];
+  if (parlays.length === 0) return [];
+  const ph = parlays.map(() => "?").join(",");
+  const legs = db
+    .prepare(
+      `${PARLAY_LEGS_WITH_MATCH} WHERE l.parlay_id IN (${ph}) ORDER BY l.parlay_id, l.leg_seq`
+    )
+    .all(...parlays.map((p) => p.id)) as ParlayLegWithMatch[];
+  const byParlay = new Map<number, ParlayLegWithMatch[]>();
+  for (const l of legs) {
+    const arr = byParlay.get(l.parlay_id);
+    if (arr) arr.push(l);
+    else byParlay.set(l.parlay_id, [l]);
+  }
+  return parlays.map((p) => ({ ...p, legs: byParlay.get(p.id) ?? [] }));
+}
+
+// Every player's pending parlays, for the public in-play board (mirrors
+// listOpenBets for single bets — all users, owner + legs joined).
+export function listOpenParlays(): OpenParlayRow[] {
+  const parlays = db
+    .prepare(
+      `SELECT p.*, u.username, u.is_bot
+       FROM parlays p JOIN users u ON u.id = p.user_id
+       WHERE p.status = 'pending'
+       ORDER BY p.created_at DESC, p.id DESC`
+    )
+    .all() as (Parlay & { username: string; is_bot: number })[];
   if (parlays.length === 0) return [];
   const ph = parlays.map(() => "?").join(",");
   const legs = db

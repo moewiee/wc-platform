@@ -88,6 +88,12 @@ export interface OpenBetRow extends BetWithMatch {
   is_bot: number;
 }
 
+// A pending parlay for the public in-play board (owner + legs joined).
+export interface OpenParlayRow extends ParlayWithLegs {
+  username: string;
+  is_bot: number;
+}
+
 export interface Txn {
   id: number;
   user_id: number;

@@ -5,20 +5,32 @@ import Link from "next/link";
 import LocalTime from "./LocalTime";
 import { fmtOdds, fmtPts } from "@/lib/money";
 
-// One serialized in-play bet for the public board (computed server-side).
-export interface OpenBetView {
-  id: number;
-  player: string;
-  isBot: boolean;
-  avatar: string | null;
+// One leg of a parlay shown on the public board.
+export interface OpenBetLeg {
   matchId: number;
   matchLabel: string; // "Canada vs Bosnia and Herzegovina"
   kickoff: string;
   label: string; // "Asian Handicap -0.5 · Canada -0.5"
   odds: number; // x1000
+}
+
+// One serialized in-play ticket for the public board (computed server-side).
+// A single bet has one match; a parlay carries its legs and spans matches.
+export interface OpenBetView {
+  id: string; // "s<betId>" or "p<parlayId>" (unique across both kinds)
+  kind: "single" | "parlay";
+  player: string;
+  isBot: boolean;
+  avatar: string | null;
+  matchId: number; // single: the match; parlay: 0 (legs carry the matches)
+  matchLabel: string; // single: "Canada vs Bosnia"; parlay: "Parlay · 3 legs"
+  kickoff: string; // single: kickoff; parlay: earliest leg kickoff
+  label: string; // single: selection label; parlay: "" (legs rendered instead)
+  odds: number; // x1000 (parlay: combined odds)
   stake: number;
   toWin: number;
   placedAt: string;
+  legs?: OpenBetLeg[]; // parlay only
 }
 
 type GroupBy = "none" | "match" | "player";
@@ -44,13 +56,27 @@ function buildGroups(bets: OpenBetView[], groupBy: GroupBy, sortBy: SortBy): Gro
   if (groupBy === "none") return [{ key: "all", title: "", bets: sorted }];
   const groups = new Map<string, Group>();
   for (const bet of sorted) {
-    const key = groupBy === "match" ? `m${bet.matchId}` : bet.player;
+    // Parlays span multiple matches, so under "group by match" they get their
+    // own bucket rather than being forced under a single match.
+    let key: string, title: string, href: string | undefined;
+    if (groupBy === "match") {
+      if (bet.kind === "parlay") {
+        key = "parlays";
+        title = "Parlays";
+        href = undefined;
+      } else {
+        key = `m${bet.matchId}`;
+        title = bet.matchLabel;
+        href = `/matches/${bet.matchId}`;
+      }
+    } else {
+      key = bet.player;
+      title = `${bet.avatar ? `${bet.avatar} ` : ""}${bet.player}`;
+      href = undefined;
+    }
     let g = groups.get(key);
     if (!g) {
-      g =
-        groupBy === "match"
-          ? { key, title: bet.matchLabel, href: `/matches/${bet.matchId}`, bets: [] }
-          : { key, title: `${bet.avatar ? `${bet.avatar} ` : ""}${bet.player}`, bets: [] };
+      g = { key, title, href, bets: [] };
       groups.set(key, g);
     }
     g.bets.push(bet);
@@ -190,16 +216,52 @@ export default function OpenBetsBoard({ bets }: { bets: OpenBetView[] }) {
                             </span>
                           )}
                         </td>
-                        <td className="px-4 py-2.5">{b.label}</td>
+                        <td className="px-4 py-2.5">
+                          {b.kind === "parlay" && b.legs ? (
+                            <div className="space-y-1">
+                              <span className="rounded bg-[#13243f] px-1.5 py-0.5 text-xs font-bold text-[#ffd166]">
+                                Parlay · {b.legs.length} legs
+                              </span>
+                              {b.legs.map((leg, i) => {
+                                const legLive = now !== null && Date.parse(leg.kickoff) <= now;
+                                return (
+                                  <div key={i} className="text-xs text-slate-300">
+                                    <Link
+                                      href={`/matches/${leg.matchId}`}
+                                      className="text-slate-400 hover:text-[#ffd166]"
+                                    >
+                                      {leg.matchLabel}
+                                    </Link>
+                                    {legLive && (
+                                      <span className="ml-1 rounded bg-red-500/20 px-1 text-[10px] font-bold text-red-400">
+                                        LIVE
+                                      </span>
+                                    )}
+                                    <span className="text-slate-300"> · {leg.label} </span>
+                                    <span className="font-mono text-slate-500">{fmtOdds(leg.odds)}</span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : (
+                            b.label
+                          )}
+                        </td>
                         {groupBy !== "match" && (
                           <td className="px-4 py-2.5 whitespace-nowrap">
-                            <Link href={`/matches/${b.matchId}`} className="text-slate-300 hover:text-[#ffd166]">
-                              {b.matchLabel}
-                            </Link>
-                            {live && (
-                              <span className="ml-1.5 rounded bg-red-500/20 px-1.5 py-0.5 text-xs font-bold text-red-400">
-                                LIVE
-                              </span>
+                            {b.kind === "parlay" ? (
+                              <span className="text-slate-500">multiple</span>
+                            ) : (
+                              <>
+                                <Link href={`/matches/${b.matchId}`} className="text-slate-300 hover:text-[#ffd166]">
+                                  {b.matchLabel}
+                                </Link>
+                                {live && (
+                                  <span className="ml-1.5 rounded bg-red-500/20 px-1.5 py-0.5 text-xs font-bold text-red-400">
+                                    LIVE
+                                  </span>
+                                )}
+                              </>
                             )}
                           </td>
                         )}
