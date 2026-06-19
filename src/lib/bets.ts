@@ -118,14 +118,18 @@ function recordBet(
   offer: { odds: number; label: string },
   stakePoints: number,
   inPlay: boolean,
-  noteSuffix: string
+  noteSuffix: string,
+  // Live score at placement — persisted so in-play AH (goals) settles on goals
+  // scored after the bet. Null for pre-match bets.
+  baseline: { home: number; away: number } | null
 ): Bet {
   const payout = payoutPoints(stakePoints, offer.odds);
   const info = db
     .prepare(
       `INSERT INTO bets (user_id, match_id, market, line, selection, label,
-         stake_points, odds, potential_payout_points, in_play, status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`
+         stake_points, odds, potential_payout_points, in_play,
+         live_home_score, live_away_score, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`
     )
     .run(
       userId,
@@ -138,6 +142,8 @@ function recordBet(
       offer.odds,
       payout,
       inPlay ? 1 : 0,
+      baseline?.home ?? null,
+      baseline?.away ?? null,
       nowIso()
     );
   const betId = Number(info.lastInsertRowid);
@@ -232,7 +238,7 @@ export async function placeBet(
       // Always price from the server-side market model — never trust client odds.
       const offer = findSelection(match, market, line, selection);
       if (!offer) throw new BetError("That market is not available right now.");
-      return recordBet(userId, match, market, line, selection, offer, stakePoints, false, "");
+      return recordBet(userId, match, market, line, selection, offer, stakePoints, false, "", null);
     })();
     return { bet };
   } catch (e) {
@@ -295,7 +301,10 @@ function bookInPlay(
         throw new RequoteError("The live price moved — review the new price.", offer.odds);
       }
       const note = ` [LIVE ${ctx.minute}' · ${ctx.homeScore}-${ctx.awayScore}]`;
-      return recordBet(userId, match, market, line, selection, offer, stakePoints, true, note);
+      return recordBet(userId, match, market, line, selection, offer, stakePoints, true, note, {
+        home: ctx.homeScore,
+        away: ctx.awayScore,
+      });
     })();
     return { bet };
   } catch (e) {
@@ -485,40 +494,64 @@ export function cancelBet(userId: number, betId: number): { error?: string } {
   }
 }
 
+// Parse the placement score from an in-play stake note ("… [LIVE 23' · 1-0]").
+// Used for legacy in-play bets struck before the structured baseline columns.
+function parseLiveNoteScore(note: string | null): { home: number; away: number } | null {
+  if (!note) return null;
+  const m = /\[LIVE[^\]]*?(\d+)\s*-\s*(\d+)\s*\]/.exec(note);
+  return m ? { home: Number(m[1]), away: Number(m[2]) } : null;
+}
+
+// The score an in-play bet was struck at — its AH settlement baseline. Prefers
+// the structured columns; falls back to the stake ledger note for bets placed
+// before those columns existed. Null for pre-match bets (count from kickoff).
+function inPlayBaseline(bet: Bet): { home: number; away: number } | null {
+  if (!bet.in_play) return null;
+  if (bet.live_home_score !== null && bet.live_away_score !== null) {
+    return { home: bet.live_home_score, away: bet.live_away_score };
+  }
+  const row = db
+    .prepare(
+      "SELECT note FROM transactions WHERE bet_id = ? AND type = 'bet_stake' ORDER BY id LIMIT 1"
+    )
+    .get(bet.id) as { note: string | null } | undefined;
+  return parseLiveNoteScore(row?.note ?? null);
+}
+
+// Map a (non-pending) settle outcome to the credited payout and final status.
+function settledPayout(
+  bet: Bet,
+  outcome: Exclude<SettleOutcome, "pending">
+): { status: "won" | "lost" | "void"; payout: number } {
+  switch (outcome) {
+    case "win":
+      return { status: "won", payout: bet.potential_payout_points };
+    case "half_win":
+      return { status: "won", payout: halfWinPayout(bet.stake_points, bet.odds) };
+    case "push":
+      return { status: "void", payout: bet.stake_points };
+    case "half_lose":
+      return { status: "lost", payout: halfLosePayout(bet.stake_points) };
+    default:
+      return { status: "lost", payout: 0 };
+  }
+}
+
 // Resolve one pending bet against final result data. Caller must run inside a
 // transaction. Returns true if the bet reached a final state.
 function resolveBet(bet: Bet, d: ResultData, context: string): boolean {
+  // In-play AH (goals) counts goals scored after placement (see settleSelection).
+  const baseline = bet.market === "ah_goals" ? inPlayBaseline(bet) : null;
   const outcome: SettleOutcome = settleSelection(
     bet.market,
     bet.line,
     bet.selection,
-    d
+    d,
+    baseline
   );
   if (outcome === "pending") return false;
 
-  let payout = 0;
-  let status: "won" | "lost" | "void";
-  switch (outcome) {
-    case "win":
-      payout = bet.potential_payout_points;
-      status = "won";
-      break;
-    case "half_win":
-      payout = halfWinPayout(bet.stake_points, bet.odds);
-      status = "won";
-      break;
-    case "push":
-      payout = bet.stake_points;
-      status = "void";
-      break;
-    case "half_lose":
-      payout = halfLosePayout(bet.stake_points);
-      status = "lost";
-      break;
-    default:
-      payout = 0;
-      status = "lost";
-  }
+  const { status, payout } = settledPayout(bet, outcome);
   db.prepare(
     "UPDATE bets SET status = ?, payout_points = ?, settled_at = ? WHERE id = ?"
   ).run(status, payout, nowIso(), bet.id);
@@ -533,6 +566,64 @@ function resolveBet(bet: Bet, d: ResultData, context: string): boolean {
     );
   }
   return true;
+}
+
+// One-off correction: in-play Asian Handicap bets settled before this fix were
+// graded on the full-time margin instead of goals scored after placement.
+// Re-grade each from its placement baseline and reconcile the balance through
+// the ledger (so the balance = 20,000 − Σstakes + Σpayouts invariant holds).
+// Idempotent — skips bets already at the correct status + payout.
+export function correctInPlayAhSettlement(): { corrected: number } {
+  const bets = db
+    .prepare(
+      "SELECT * FROM bets WHERE in_play = 1 AND market = 'ah_goals' AND status IN ('won','lost','void')"
+    )
+    .all() as Bet[];
+  let corrected = 0;
+  for (const bet of bets) {
+    const m = db
+      .prepare("SELECT home_score, away_score FROM matches WHERE id = ?")
+      .get(bet.match_id) as
+      | { home_score: number | null; away_score: number | null }
+      | undefined;
+    if (!m || m.home_score === null || m.away_score === null) continue;
+    const baseline = inPlayBaseline(bet);
+    if (!baseline) continue; // placement score unknown — leave as graded
+    const d: ResultData = {
+      homeScore: m.home_score,
+      awayScore: m.away_score,
+      cornersHome: null,
+      cornersAway: null,
+      cardsTotal: null,
+    };
+    const outcome = settleSelection("ah_goals", bet.line, bet.selection, d, baseline);
+    if (outcome === "pending") continue;
+    const { status, payout } = settledPayout(bet, outcome);
+    const oldPayout = bet.payout_points ?? 0;
+    if (status === bet.status && payout === oldPayout) continue; // already correct
+    db.transaction(() => {
+      db.prepare("UPDATE bets SET status = ?, payout_points = ? WHERE id = ?").run(
+        status,
+        payout,
+        bet.id
+      );
+      const delta = payout - oldPayout;
+      if (delta !== 0) {
+        applyBalanceChange(
+          bet.user_id,
+          delta,
+          "bet_correction",
+          bet.id,
+          `Re-settled in-play AH from placement ${baseline.home}-${baseline.away}: ${bet.label}`
+        );
+      }
+    })();
+    corrected++;
+    console.log(
+      `[correct] bet ${bet.id} "${bet.label}" base ${baseline.home}-${baseline.away}: ${bet.status}/${oldPayout} → ${status}/${payout}`
+    );
+  }
+  return { corrected };
 }
 
 // ── Parlay settlement ────────────────────────────────────────────────────────
@@ -933,6 +1024,24 @@ export function listOpenBets(): OpenBetRow[] {
     .all() as OpenBetRow[];
 }
 
+// Every player's settled single bets, for the public bet-history board.
+// Resolved tickets only (won/lost/void) — pending bets live on the in-play
+// board and cancelled bets are intentionally hidden.
+export function listSettledBets(): OpenBetRow[] {
+  return db
+    .prepare(
+      `SELECT b.*, m.home_team, m.away_team, m.kickoff,
+              m.status AS match_status, m.home_score, m.away_score,
+              u.username, u.is_bot
+       FROM bets b
+       JOIN matches m ON m.id = b.match_id
+       JOIN users u ON u.id = b.user_id
+       WHERE b.status IN ('won', 'lost', 'void')
+       ORDER BY b.settled_at DESC, b.id DESC`
+    )
+    .all() as OpenBetRow[];
+}
+
 export function listUserBets(userId: number): BetWithMatch[] {
   return db
     .prepare(`${BET_WITH_MATCH} WHERE b.user_id = ? ORDER BY b.created_at DESC, b.id DESC`)
@@ -1049,6 +1158,33 @@ export function listOpenParlays(): OpenParlayRow[] {
        FROM parlays p JOIN users u ON u.id = p.user_id
        WHERE p.status = 'pending'
        ORDER BY p.created_at DESC, p.id DESC`
+    )
+    .all() as (Parlay & { username: string; is_bot: number })[];
+  if (parlays.length === 0) return [];
+  const ph = parlays.map(() => "?").join(",");
+  const legs = db
+    .prepare(
+      `${PARLAY_LEGS_WITH_MATCH} WHERE l.parlay_id IN (${ph}) ORDER BY l.parlay_id, l.leg_seq`
+    )
+    .all(...parlays.map((p) => p.id)) as ParlayLegWithMatch[];
+  const byParlay = new Map<number, ParlayLegWithMatch[]>();
+  for (const l of legs) {
+    const arr = byParlay.get(l.parlay_id);
+    if (arr) arr.push(l);
+    else byParlay.set(l.parlay_id, [l]);
+  }
+  return parlays.map((p) => ({ ...p, legs: byParlay.get(p.id) ?? [] }));
+}
+
+// Every player's settled parlays, for the public bet-history board (mirrors
+// listSettledBets — resolved tickets only, cancelled hidden, legs joined).
+export function listSettledParlays(): OpenParlayRow[] {
+  const parlays = db
+    .prepare(
+      `SELECT p.*, u.username, u.is_bot
+       FROM parlays p JOIN users u ON u.id = p.user_id
+       WHERE p.status IN ('won', 'lost', 'void')
+       ORDER BY p.settled_at DESC, p.id DESC`
     )
     .all() as (Parlay & { username: string; is_bot: number })[];
   if (parlays.length === 0) return [];

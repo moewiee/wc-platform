@@ -1,4 +1,5 @@
-import { maybeEarlyResolve } from "./bets";
+import { correctInPlayAhSettlement, maybeEarlyResolve } from "./bets";
+import { getMeta, setMeta } from "./db";
 import { maybeRefreshMarketOdds, maybeRefreshOdds, maybeSyncScores } from "./matches";
 import { maybeGenerateAiTips } from "./tips";
 import { maybePlaceTipsterBets } from "./tipster-bets";
@@ -56,8 +57,22 @@ async function tick(): Promise<void> {
   }
 }
 
+// One-off data corrections, run once ever (stamped in `meta`), before the loop.
+const RESETTLE_AH_KEY = "inplay_ah_resettle_v1";
+function runOneOffCorrections(): void {
+  try {
+    if (getMeta(RESETTLE_AH_KEY) !== null) return;
+    const res = correctInPlayAhSettlement();
+    setMeta(RESETTLE_AH_KEY, new Date().toISOString());
+    console.log(`[correct] in-play AH re-settle: ${res.corrected} bets corrected`);
+  } catch (e) {
+    console.error("[correct] in-play AH re-settle failed:", e instanceof Error ? e.message : e);
+  }
+}
+
 export function startSyncLoop(): void {
   if (global.__wcSyncTimer) return; // already running (dev HMR re-imports)
+  runOneOffCorrections();
   global.__wcSyncTimer = setInterval(() => void tick(), TICK_MS);
   global.__wcSyncTimer.unref?.();
   void tick(); // immediately, so a restart settles overdue matches right away

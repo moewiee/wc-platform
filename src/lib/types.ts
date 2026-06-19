@@ -70,6 +70,10 @@ export interface Bet {
   payout_points: number | null; // actual credit when settled
   status: BetStatus;
   in_play: number; // 1 = struck after kickoff (live); display/audit only
+  // Live score at placement (in-play bets only; NULL pre-match). In-play AH
+  // settles on goals scored after this baseline — see settleSelection.
+  live_home_score: number | null;
+  live_away_score: number | null;
   created_at: string;
   settled_at: string | null;
 }

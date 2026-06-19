@@ -181,6 +181,14 @@ function migrate(db: Database.Database) {
   if (!betCols.some((c) => c.name === "in_play")) {
     db.exec("ALTER TABLE bets ADD COLUMN in_play INTEGER NOT NULL DEFAULT 0");
   }
+  // Added after launch: the live score at the moment an in-play bet was struck.
+  // In-play Asian Handicap settles on goals scored AFTER placement (the Bet365
+  // live line is quoted relative to the current score), so settlement subtracts
+  // this baseline. NULL for pre-match bets (baseline 0-0).
+  if (!betCols.some((c) => c.name === "live_home_score")) {
+    db.exec("ALTER TABLE bets ADD COLUMN live_home_score INTEGER");
+    db.exec("ALTER TABLE bets ADD COLUMN live_away_score INTEGER");
+  }
   // Added after launch: separates live (in_play=1) from pre-match (0) quotes so
   // the in-play sheet can never read a stale pre-match price.
   const moCols = db.prepare("PRAGMA table_info(market_odds)").all() as { name: string }[];

@@ -444,7 +444,13 @@ export function settleSelection(
   market: MarketType,
   line: number | null,
   selection: string,
-  d: ResultData
+  d: ResultData,
+  // In-play Asian Handicap (goals) is quoted relative to the score when the bet
+  // was struck, so it settles on goals scored AFTER placement. `baseline` is
+  // that placement score; omitted/null means count from kickoff (pre-match,
+  // parlay legs, and every other market — totals, corners, 1X2/CS/BTTS — which
+  // the feed quotes cumulatively / settles full-match, so all unaffected).
+  baseline?: { home: number; away: number } | null
 ): SettleOutcome {
   switch (market) {
     case "h2h": {
@@ -452,11 +458,17 @@ export function settleSelection(
         d.homeScore > d.awayScore ? "home" : d.homeScore < d.awayScore ? "away" : "draw";
       return selection === result ? "win" : "lose";
     }
-    case "ah_goals":
-      return settleAh(d.homeScore - d.awayScore, line ?? 0, selection);
+    case "ah_goals": {
+      const homeAfter = d.homeScore - (baseline?.home ?? 0);
+      const awayAfter = d.awayScore - (baseline?.away ?? 0);
+      return settleAh(homeAfter - awayAfter, line ?? 0, selection);
+    }
     case "ou_goals":
       return settleTotals(d.homeScore + d.awayScore, line ?? 2.5, selection);
     case "ah_corners":
+      // Full match — unlike the goal handicap, Bet365 settles in-play Asian
+      // corners "as pre-game Asian corners" (handicap applied to the FINAL
+      // corner count), with no reset to the placement tally.
       if (d.cornersHome === null || d.cornersAway === null) return "pending";
       return settleAh(d.cornersHome - d.cornersAway, line ?? 0, selection);
     case "ou_corners":
