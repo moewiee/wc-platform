@@ -11,7 +11,7 @@ export default async function LeaderboardPage() {
   const user = await getCurrentUser();
   const rows = getLeaderboard();
   return (
-    <div className="mx-auto max-w-3xl">
+    <div className="mx-auto max-w-4xl">
       <h1 className="mb-1 text-2xl font-bold">Leaderboard</h1>
       <p className="mb-6 text-sm text-slate-400">
         Ranked by total worth (balance + stakes in play). Everyone started with{" "}
@@ -26,6 +26,7 @@ export default async function LeaderboardPage() {
               <th className="px-4 py-3 text-right">Balance</th>
               <th className="px-4 py-3 text-right">In play</th>
               <th className="px-4 py-3 text-right">W–L</th>
+              <th className="px-4 py-3 text-right">Volume</th>
               <th className="px-4 py-3 text-right">Profit</th>
             </tr>
           </thead>
@@ -64,6 +65,9 @@ export default async function LeaderboardPage() {
                   </td>
                   <td className="px-4 py-3 text-right font-mono text-slate-400">
                     {r.wins}–{r.losses}
+                  </td>
+                  <td className="px-4 py-3 text-right font-mono text-slate-400">
+                    {fmtPts(r.volume_points)}
                   </td>
                   <td
                     className={`px-4 py-3 text-right font-mono font-semibold ${

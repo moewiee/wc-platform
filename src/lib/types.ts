@@ -159,6 +159,7 @@ export interface LeaderboardRow {
   is_bot: number;
   balance_points: number;
   in_play_points: number;
+  volume_points: number; // total stake ever placed (excl. cancelled)
   wins: number;
   losses: number;
   pending: number;

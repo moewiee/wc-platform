@@ -10,6 +10,7 @@ export function getLeaderboard(): LeaderboardRow[] {
     .prepare(
       `SELECT u.id, u.username, u.is_bot, u.balance_points,
               COALESCE(b.in_play_points, 0) + COALESCE(p.in_play_points, 0) AS in_play_points,
+              COALESCE(b.volume_points, 0) + COALESCE(p.volume_points, 0) AS volume_points,
               COALESCE(b.wins, 0) + COALESCE(p.wins, 0) AS wins,
               COALESCE(b.losses, 0) + COALESCE(p.losses, 0) AS losses,
               COALESCE(b.pending, 0) + COALESCE(p.pending, 0) AS pending
@@ -17,6 +18,7 @@ export function getLeaderboard(): LeaderboardRow[] {
        LEFT JOIN (
          SELECT user_id,
                 SUM(CASE WHEN status = 'pending' THEN stake_points ELSE 0 END) AS in_play_points,
+                SUM(CASE WHEN status != 'cancelled' THEN stake_points ELSE 0 END) AS volume_points,
                 SUM(CASE WHEN status = 'won' THEN 1 ELSE 0 END) AS wins,
                 SUM(CASE WHEN status = 'lost' THEN 1 ELSE 0 END) AS losses,
                 SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending
@@ -25,6 +27,7 @@ export function getLeaderboard(): LeaderboardRow[] {
        LEFT JOIN (
          SELECT user_id,
                 SUM(CASE WHEN status = 'pending' THEN stake_points ELSE 0 END) AS in_play_points,
+                SUM(CASE WHEN status != 'cancelled' THEN stake_points ELSE 0 END) AS volume_points,
                 SUM(CASE WHEN status = 'won' THEN 1 ELSE 0 END) AS wins,
                 SUM(CASE WHEN status = 'lost' THEN 1 ELSE 0 END) AS losses,
                 SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending
