@@ -31,7 +31,7 @@ export interface HistoryBetView {
   label: string; // single: selection label; parlay: "" (legs rendered instead)
   odds: number; // x1000 (parlay: combined odds)
   stake: number;
-  payout: number; // points credited on settlement (0 on a loss)
+  payout: number; // points credited on settlement (0 on a full loss; half the stake on a half-loss)
   status: HistoryStatus;
   inPlay: boolean; // true = struck after kickoff (live); parlays are pre-match only
   settledAt: string;
@@ -328,7 +328,9 @@ export default function BetHistoryBoard({ bets }: { bets: HistoryBetView[] }) {
                       <td className="px-4 py-2.5 text-right font-mono">
                         {b.status === "won" ? (
                           <span className="text-[#f0b429]">{fmtPts(b.payout)}</span>
-                        ) : b.status === "void" ? (
+                        ) : b.payout > 0 ? (
+                          // void = full refund; a "lost" ticket with a positive
+                          // payout is a half-loss (half the stake refunded).
                           <span className="text-slate-400">{fmtPts(b.payout)}</span>
                         ) : (
                           <span className="text-slate-600">—</span>
