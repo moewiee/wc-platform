@@ -74,6 +74,11 @@ export interface Bet {
   // settles on goals scored after this baseline — see settleSelection.
   live_home_score: number | null;
   live_away_score: number | null;
+  // Live match period at placement (ESPN status.period: 1-2 regulation, 3-4
+  // extra time, 5 penalties; NULL pre-match). A knockout bet struck in extra
+  // time (>= 3) settles on the end-of-ET goal score; otherwise on the 90'
+  // regulation result. See bets.ts isEtPhaseBet / settleMatch.
+  live_period: number | null;
   created_at: string;
   settled_at: string | null;
 }
@@ -90,12 +95,14 @@ export interface BetWithMatch extends Bet {
 export interface OpenBetRow extends BetWithMatch {
   username: string;
   is_bot: number;
+  is_admin: number;
 }
 
 // A pending parlay for the public in-play board (owner + legs joined).
 export interface OpenParlayRow extends ParlayWithLegs {
   username: string;
   is_bot: number;
+  is_admin: number;
 }
 
 export interface Txn {
@@ -157,6 +164,7 @@ export interface LeaderboardRow {
   id: number;
   username: string;
   is_bot: number;
+  is_admin: number;
   balance_points: number;
   in_play_points: number;
   volume_points: number; // total stake ever placed (excl. cancelled)

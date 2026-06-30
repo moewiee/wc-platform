@@ -115,7 +115,10 @@ function migrate(db: Database.Database) {
       last_change_at TEXT,
       suspend_until TEXT,
       corners_home INTEGER,
-      corners_away INTEGER
+      corners_away INTEGER,
+      period INTEGER,
+      reg_home_score INTEGER,
+      reg_away_score INTEGER
     );
     -- Cross-match accumulators (parlays). A parent row holds the combined stake
     -- and the locked combined odds (product of the legs' real quotes); the legs
@@ -148,6 +151,21 @@ function migrate(db: Database.Database) {
         CHECK (leg_status IN ('pending','win','lose','push','half_win','half_lose')),
       settled_at TEXT
     );
+    -- Per-(user, ip, user-agent) request fingerprint. One row per distinct
+    -- device/network a session is used from (deduped on insert) — captures the
+    -- real client IP from Cloudflare's cf-connecting-ip header for abuse triage.
+    CREATE TABLE IF NOT EXISTS request_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER REFERENCES users(id),
+      ip TEXT,
+      user_agent TEXT,
+      path TEXT,
+      first_seen TEXT NOT NULL,
+      last_seen TEXT NOT NULL,
+      hits INTEGER NOT NULL DEFAULT 1
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_request_log_uniq
+      ON request_log(user_id, ip, user_agent);
     CREATE INDEX IF NOT EXISTS idx_bets_user ON bets(user_id);
     CREATE INDEX IF NOT EXISTS idx_bets_match ON bets(match_id);
     CREATE INDEX IF NOT EXISTS idx_txns_user ON transactions(user_id);
@@ -189,6 +207,14 @@ function migrate(db: Database.Database) {
     db.exec("ALTER TABLE bets ADD COLUMN live_home_score INTEGER");
     db.exec("ALTER TABLE bets ADD COLUMN live_away_score INTEGER");
   }
+  // Added after launch: the live match period at placement (ESPN status.period —
+  // 1-2 regulation, 3-4 extra time, 5 penalties; NULL for pre-match). Knockout
+  // bets struck during extra time (>= 3) settle on the END-OF-ET goal score,
+  // while regulation/pre-match bets settle on the 90' result — so settlement
+  // branches on this. NULL = regulation/pre-match basis.
+  if (!betCols.some((c) => c.name === "live_period")) {
+    db.exec("ALTER TABLE bets ADD COLUMN live_period INTEGER");
+  }
   // Added after launch: separates live (in_play=1) from pre-match (0) quotes so
   // the in-play sheet can never read a stale pre-match price.
   const moCols = db.prepare("PRAGMA table_info(market_odds)").all() as { name: string }[];
@@ -205,6 +231,14 @@ function migrate(db: Database.Database) {
   if (lsCols.length > 0 && !lsCols.some((c) => c.name === "corners_home")) {
     db.exec("ALTER TABLE live_state ADD COLUMN corners_home INTEGER");
     db.exec("ALTER TABLE live_state ADD COLUMN corners_away INTEGER");
+  }
+  // Added after launch: track the live period and freeze the regulation (90')
+  // score, so a knockout that goes to extra time settles on its full-time
+  // result (ET/penalties never count).
+  if (lsCols.length > 0 && !lsCols.some((c) => c.name === "period")) {
+    db.exec("ALTER TABLE live_state ADD COLUMN period INTEGER");
+    db.exec("ALTER TABLE live_state ADD COLUMN reg_home_score INTEGER");
+    db.exec("ALTER TABLE live_state ADD COLUMN reg_away_score INTEGER");
   }
 }
 

@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import bcrypt from "bcryptjs";
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { db, nowIso } from "./db";
 import { STARTING_BALANCE_POINTS } from "./money";
@@ -140,23 +140,85 @@ export function getUserByToken(token: string): User | null {
   return row ?? null;
 }
 
+// --- Request fingerprinting (abuse triage) ------------------------------
+// We store no PII at registration, so the only handle on "who is this account"
+// is the network it connects from. Behind the Cloudflare Tunnel the real client
+// IP arrives in `cf-connecting-ip` (the app socket only ever sees 127.0.0.1).
+// We dedupe on (user, ip, user-agent) so this is one row per distinct device,
+// not a per-request firehose. Best-effort: never let it break auth.
+
+type HeaderLike = { get(name: string): string | null };
+
+function clientIpFrom(h: HeaderLike): string {
+  const cf = h.get("cf-connecting-ip");
+  if (cf) return cf.trim();
+  const fwd = h.get("x-forwarded-for");
+  if (fwd) return fwd.split(",")[0]!.trim();
+  const real = h.get("x-real-ip");
+  if (real) return real.trim();
+  return "unknown";
+}
+
+const upsertRequestLog = db.prepare(
+  `INSERT INTO request_log (user_id, ip, user_agent, path, first_seen, last_seen, hits)
+   VALUES (@user_id, @ip, @ua, @path, @now, @now, 1)
+   ON CONFLICT(user_id, ip, user_agent)
+   DO UPDATE SET last_seen = @now, hits = hits + 1,
+                 path = COALESCE(excluded.path, request_log.path)`
+);
+
+function recordRequest(userId: number, h: HeaderLike, path: string | null): void {
+  try {
+    const now = nowIso();
+    upsertRequestLog.run({
+      user_id: userId,
+      ip: clientIpFrom(h),
+      ua: (h.get("user-agent") ?? "unknown").slice(0, 400),
+      path,
+      now,
+    });
+  } catch {
+    // Logging must never interfere with authentication.
+  }
+}
+
 export async function getCurrentUser(): Promise<User | null> {
   const store = await cookies();
   const token = store.get(SESSION_COOKIE)?.value;
   if (!token) return null;
-  return getUserByToken(token);
+  const user = getUserByToken(token);
+  if (user) {
+    try {
+      const h = await headers();
+      recordRequest(user.id, h, h.get("x-pathname") ?? h.get("referer"));
+    } catch {
+      // headers() unavailable outside a request scope — skip silently.
+    }
+  }
+  return user;
 }
 
 // REST API auth: Authorization: Bearer <token> or the session cookie.
 export function getUserFromRequest(req: Request): User | null {
+  let user: User | null = null;
   const authHeader = req.headers.get("authorization");
   if (authHeader?.toLowerCase().startsWith("bearer ")) {
-    return getUserByToken(authHeader.slice(7).trim());
+    user = getUserByToken(authHeader.slice(7).trim());
+  } else {
+    const cookieHeader = req.headers.get("cookie") ?? "";
+    const m = cookieHeader.match(new RegExp(`(?:^|;\\s*)${SESSION_COOKIE}=([^;]+)`));
+    if (m) user = getUserByToken(decodeURIComponent(m[1]));
   }
-  const cookieHeader = req.headers.get("cookie") ?? "";
-  const m = cookieHeader.match(new RegExp(`(?:^|;\\s*)${SESSION_COOKIE}=([^;]+)`));
-  if (m) return getUserByToken(decodeURIComponent(m[1]));
-  return null;
+  if (user) {
+    let path: string | null = null;
+    try {
+      path = new URL(req.url).pathname;
+    } catch {
+      /* non-absolute URL — leave path null */
+    }
+    recordRequest(user.id, req.headers, path);
+  }
+  return user;
 }
 
 export async function requireUser(): Promise<User> {

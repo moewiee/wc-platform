@@ -38,7 +38,8 @@ interface EspnEvent {
     status?: {
       clock?: number; // elapsed seconds (e.g. 5400 at full time)
       displayClock?: string; // running game clock, e.g. "67'"
-      type?: { state?: string; completed?: boolean; shortDetail?: string };
+      period?: number; // 1-2 regulation, 3-4 extra time, 5 penalties
+      type?: { state?: string; completed?: boolean; shortDetail?: string; name?: string };
     };
     competitors?: EspnCompetitor[];
     odds?: {
@@ -167,6 +168,8 @@ export interface EspnLiveScore {
   detail: string; // shortDetail, e.g. "HT", "FT", "2nd Half" — NOT a minute
   displayClock: string; // running clock string, e.g. "67'", "45'+2"
   clockSeconds: number | null; // elapsed seconds when the feed provides it
+  period: number | null; // 1-2 regulation, 3-4 extra time, 5 penalties (knockout)
+  statusName: string; // ESPN type.name, e.g. STATUS_OVERTIME, STATUS_FINAL_PEN
   corners_home: number | null; // live wonCorners when the scoreboard carries it
   corners_away: number | null;
 }
@@ -203,6 +206,10 @@ export async function fetchEspnLiveScores(): Promise<EspnLiveScore[]> {
       typeof status?.clock === "number" && Number.isFinite(status.clock)
         ? status.clock
         : null;
+    const period =
+      typeof status?.period === "number" && Number.isFinite(status.period)
+        ? status.period
+        : null;
     live.push({
       home_team: home.team.displayName,
       away_team: away.team.displayName,
@@ -213,6 +220,8 @@ export async function fetchEspnLiveScores(): Promise<EspnLiveScore[]> {
       detail,
       displayClock,
       clockSeconds,
+      period,
+      statusName: status?.type?.name ?? "",
       corners_home: intStat(home, "wonCorners"),
       corners_away: intStat(away, "wonCorners"),
     });

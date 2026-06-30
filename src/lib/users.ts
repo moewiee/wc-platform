@@ -8,7 +8,7 @@ export function getLeaderboard(): LeaderboardRow[] {
   // kind. Ranking is net worth = balance + open stake.
   return db
     .prepare(
-      `SELECT u.id, u.username, u.is_bot, u.balance_points,
+      `SELECT u.id, u.username, u.is_bot, u.is_admin, u.balance_points,
               COALESCE(b.in_play_points, 0) + COALESCE(p.in_play_points, 0) AS in_play_points,
               COALESCE(b.volume_points, 0) + COALESCE(p.volume_points, 0) AS volume_points,
               COALESCE(b.wins, 0) + COALESCE(p.wins, 0) AS wins,

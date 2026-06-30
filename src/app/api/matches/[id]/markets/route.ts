@@ -55,9 +55,11 @@ export async function GET(
     });
   }
   const ctx = await getLiveContext(match);
+  // In extra time a knockout offers goal markets only (goal AH + goal totals).
+  const etGoalsOnly = ctx.period === 3 || ctx.period === 4;
   const markets =
     ctx.available && !ctx.suspended && ctx.minute !== null
-      ? liveMarketsForMatch(match)
+      ? liveMarketsForMatch(match, etGoalsOnly)
       : [];
   return NextResponse.json({
     inPlay: true,

@@ -24,6 +24,7 @@ export interface HistoryBetView {
   kind: "single" | "parlay";
   player: string;
   isBot: boolean;
+  isAdmin: boolean;
   avatar: string | null;
   matchId: number; // single: the match; parlay: 0 (legs carry the matches)
   matchLabel: string; // single: "Canada vs Bosnia"; parlay: "Parlay · 3 legs"
@@ -157,11 +158,17 @@ function StatusBadge({ status }: { status: HistoryStatus }) {
 export default function BetHistoryBoard({ bets }: { bets: HistoryBetView[] }) {
   const [groupBy, setGroupBy] = useState<GroupBy>("none");
   const [sortBy, setSortBy] = useState<SortBy>("settled");
+  // Exclude non-players (tipster bots + admin) to see only real players' bets.
+  const [playersOnly, setPlayersOnly] = useState(false);
 
-  const groups = useMemo(() => buildGroups(bets, groupBy, sortBy), [bets, groupBy, sortBy]);
+  const visible = useMemo(
+    () => (playersOnly ? bets.filter((b) => !b.isBot && !b.isAdmin) : bets),
+    [bets, playersOnly]
+  );
+  const groups = useMemo(() => buildGroups(visible, groupBy, sortBy), [visible, groupBy, sortBy]);
   const totals = useMemo(
     () =>
-      bets.reduce(
+      visible.reduce(
         (t, b) => {
           t.staked += b.stake;
           t.returned += b.payout;
@@ -169,7 +176,7 @@ export default function BetHistoryBoard({ bets }: { bets: HistoryBetView[] }) {
         },
         { staked: 0, returned: 0 }
       ),
-    [bets]
+    [visible]
   );
 
   if (bets.length === 0) {
@@ -205,11 +212,28 @@ export default function BetHistoryBoard({ bets }: { bets: HistoryBetView[] }) {
           ]}
           onChange={setSortBy}
         />
+        <button
+          type="button"
+          onClick={() => setPlayersOnly((v) => !v)}
+          aria-pressed={playersOnly}
+          className={`rounded-md border px-3 py-1.5 text-sm font-semibold ${
+            playersOnly
+              ? "border-[#f0b429] bg-[#f0b429]/15 text-[#f0b429]"
+              : "border-[#1b2c4a] bg-[#13243f] text-slate-300"
+          }`}
+        >
+          {playersOnly ? "✓ " : ""}Players only
+        </button>
         <span className="ml-auto text-xs text-slate-400">
-          {bets.length} bets · {fmtPts(totals.staked)} staked · {fmtPts(totals.returned)} returned
+          {visible.length} bets · {fmtPts(totals.staked)} staked · {fmtPts(totals.returned)} returned
         </span>
       </div>
 
+      {groups.length === 0 ? (
+        <div className="rounded-lg border border-[#1b2c4a] bg-[#0e1c33] p-8 text-center text-slate-400">
+          No players&apos; settled bets yet.
+        </div>
+      ) : (
       <div className="space-y-4">
         {groups.map((g) => (
           <div key={g.key} className="overflow-hidden rounded-lg border border-[#1b2c4a]">
@@ -321,6 +345,7 @@ export default function BetHistoryBoard({ bets }: { bets: HistoryBetView[] }) {
           </div>
         ))}
       </div>
+      )}
     </div>
   );
 }

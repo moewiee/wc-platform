@@ -9,10 +9,14 @@ import {
 } from "./markets";
 import {
   getConfirmedLiveScore,
+  getFrozenRegulationScore,
+  getKnockoutRegulationResult,
   getLiveContext,
   getLiveContextSync,
+  getLivePeriod,
   hasFreshLiveQuote,
   inPlayEnabled,
+  isMatchInEt,
   refreshLiveObservations,
   type LiveContext,
 } from "./live";
@@ -121,15 +125,18 @@ function recordBet(
   noteSuffix: string,
   // Live score at placement — persisted so in-play AH (goals) settles on goals
   // scored after the bet. Null for pre-match bets.
-  baseline: { home: number; away: number } | null
+  baseline: { home: number; away: number } | null,
+  // Live match period at placement (ESPN status.period; null pre-match). A
+  // knockout bet struck in extra time (>= 3) settles on the end-of-ET score.
+  livePeriod: number | null
 ): Bet {
   const payout = payoutPoints(stakePoints, offer.odds);
   const info = db
     .prepare(
       `INSERT INTO bets (user_id, match_id, market, line, selection, label,
          stake_points, odds, potential_payout_points, in_play,
-         live_home_score, live_away_score, status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`
+         live_home_score, live_away_score, live_period, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`
     )
     .run(
       userId,
@@ -144,6 +151,7 @@ function recordBet(
       inPlay ? 1 : 0,
       baseline?.home ?? null,
       baseline?.away ?? null,
+      livePeriod,
       nowIso()
     );
   const betId = Number(info.lastInsertRowid);
@@ -238,7 +246,7 @@ export async function placeBet(
       // Always price from the server-side market model — never trust client odds.
       const offer = findSelection(match, market, line, selection);
       if (!offer) throw new BetError("That market is not available right now.");
-      return recordBet(userId, match, market, line, selection, offer, stakePoints, false, "", null);
+      return recordBet(userId, match, market, line, selection, offer, stakePoints, false, "", null, null);
     })();
     return { bet };
   } catch (e) {
@@ -290,7 +298,10 @@ function bookInPlay(
       if (!hasFreshLiveQuote(match.id)) {
         throw new BetError("In-play prices are updating — try again in a moment.");
       }
-      const offer = findLiveSelection(match, market, line, selection);
+      // In extra time a knockout offers goal markets only — re-price against the
+      // same filtered sheet the player saw, so a non-goal market can't be booked.
+      const etGoalsOnly = ctx.period === 3 || ctx.period === 4;
+      const offer = findLiveSelection(match, market, line, selection, etGoalsOnly);
       if (!offer) throw new BetError("That market isn't available at the live price right now.");
       // Re-quote only when the fresh price is materially WORSE for the bettor.
       if (
@@ -301,10 +312,19 @@ function bookInPlay(
         throw new RequoteError("The live price moved — review the new price.", offer.odds);
       }
       const note = ` [LIVE ${ctx.minute}' · ${ctx.homeScore}-${ctx.awayScore}]`;
-      return recordBet(userId, match, market, line, selection, offer, stakePoints, true, note, {
-        home: ctx.homeScore,
-        away: ctx.awayScore,
-      });
+      return recordBet(
+        userId,
+        match,
+        market,
+        line,
+        selection,
+        offer,
+        stakePoints,
+        true,
+        note,
+        { home: ctx.homeScore, away: ctx.awayScore },
+        ctx.period
+      );
     })();
     return { bet };
   } catch (e) {
@@ -535,6 +555,14 @@ function settledPayout(
     default:
       return { status: "lost", payout: 0 };
   }
+}
+
+// A knockout goal bet struck in extra time (period 3-4) settles on the
+// END-OF-ET goal score; everything else — pre-match, regulation in-play, and
+// all group-stage bets — settles on the 90' regulation result. Penalties (>= 5)
+// aren't offered for betting, so an ET-phase bet is always period 3-4.
+function isEtPhaseBet(bet: Bet): boolean {
+  return bet.in_play === 1 && bet.live_period != null && bet.live_period >= 3;
 }
 
 // Resolve one pending bet against final result data. Caller must run inside a
@@ -796,15 +824,28 @@ export function settleMatch(
         result,
         matchId
       );
+      // Phase-aware grading for knockouts that went to extra time: the recorded
+      // score (homeScore/awayScore) is the END-OF-ET goal total, on which
+      // extra-time bets settle; regulation/pre-match bets settle on the frozen
+      // 90' score. Goals only differ between the two — corners/cards are
+      // full-match for both (regData inherits them). For group matches and
+      // knockouts decided in regulation, the frozen score equals the final, so
+      // regData == d and every bet settles identically (no behavior change).
+      const reg = match.group_name === null ? getFrozenRegulationScore(matchId) : null;
+      const regData: ResultData = reg
+        ? { ...d, homeScore: reg.home, awayScore: reg.away }
+        : d;
       const pending = db
         .prepare("SELECT * FROM bets WHERE match_id = ? AND status = 'pending'")
         .all(matchId) as Bet[];
-      const context = `${match.home_team} ${homeScore}-${awayScore} ${match.away_team}`;
       let settled = 0;
       for (const bet of pending) {
-        if (resolveBet(bet, d, context)) settled++;
+        const data = isEtPhaseBet(bet) ? d : regData;
+        const context = `${match.home_team} ${data.homeScore}-${data.awayScore} ${match.away_team}`;
+        if (resolveBet(bet, data, context)) settled++;
       }
-      settleParlayLegsForMatch(matchId, d);
+      // Parlay legs are pre-match only → regulation basis.
+      settleParlayLegsForMatch(matchId, regData);
       return settled;
     })();
     return { settledBets };
@@ -888,24 +929,34 @@ export async function maybeEarlyResolve(): Promise<{ resolved: number }> {
   await refreshLiveObservations(); // keep live_state fresh even with no page traffic
   const live = db
     .prepare(
-      "SELECT id, api_id, home_team, away_team FROM matches WHERE status = 'scheduled' AND kickoff <= ?"
+      "SELECT id, api_id, home_team, away_team, group_name FROM matches WHERE status = 'scheduled' AND kickoff <= ?"
     )
-    .all(nowIso()) as Pick<Match, "id" | "api_id" | "home_team" | "away_team">[];
+    .all(nowIso()) as Pick<Match, "id" | "api_id" | "home_team" | "away_team" | "group_name">[];
   const placeholders = EARLY_RESOLVE_MARKETS.map(() => "?").join(",");
   let resolved = 0;
   for (const m of live) {
     const score = getConfirmedLiveScore(m.id);
     if (!score) continue;
-    const pending = db
-      .prepare(
-        `SELECT * FROM bets WHERE match_id = ? AND status = 'pending' AND market IN (${placeholders})`
-      )
-      .all(m.id, ...EARLY_RESOLVE_MARKETS) as Bet[];
-    const pendingLegs = db
-      .prepare(
-        `SELECT * FROM parlay_legs WHERE match_id = ? AND leg_status = 'pending' AND market IN (${placeholders})`
-      )
-      .all(m.id, ...EARLY_RESOLVE_MARKETS) as ParlayLeg[];
+    // A knockout in extra time: the confirmed live score is ET-inclusive, so it
+    // only validly locks EXTRA-TIME bets (cumulative on the full match).
+    // Regulation-phase bets settle on the 90' score (maybeSettleRegulationGoalBets)
+    // and parlay legs are pre-match (regulation basis) — exclude both here so a
+    // late ET goal can't lock a regulation bet on the wrong total.
+    const inEt = m.group_name === null && isMatchInEt(m.id);
+    const pending = (
+      db
+        .prepare(
+          `SELECT * FROM bets WHERE match_id = ? AND status = 'pending' AND market IN (${placeholders})`
+        )
+        .all(m.id, ...EARLY_RESOLVE_MARKETS) as Bet[]
+    ).filter((b) => !inEt || isEtPhaseBet(b));
+    const pendingLegs = inEt
+      ? []
+      : (db
+          .prepare(
+            `SELECT * FROM parlay_legs WHERE match_id = ? AND leg_status = 'pending' AND market IN (${placeholders})`
+          )
+          .all(m.id, ...EARLY_RESOLVE_MARKETS) as ParlayLeg[]);
     if (pending.length === 0 && pendingLegs.length === 0) continue;
     // Live card total only when a card market is open and we have an ESPN id.
     let cardsTotal: number | null = null;
@@ -965,6 +1016,86 @@ export async function maybeEarlyResolve(): Promise<{ resolved: number }> {
   return { resolved };
 }
 
+// Goal-only markets — settle purely from the goal score (no corner/card data),
+// so they can be graded at the end of regulation before the box score exists.
+const GOAL_SETTLE_MARKETS = new Set<MarketType>([
+  "h2h",
+  "ah_goals",
+  "ou_goals",
+  "correct_score",
+  "btts",
+]);
+
+// When a knockout enters extra time, settle its REGULATION-phase goal bets (and
+// pre-match parlay legs) on the frozen 90' result immediately — pre-ET bets pay
+// out at full time without waiting for ET/penalties. The match stays
+// 'scheduled' so extra-time betting (goal AH/O&U) stays open; those ET bets,
+// plus corner/card bets, settle later at completion (settleMatch, phase-aware).
+// getKnockoutRegulationResult fails closed unless the frozen score is a level
+// draw from a fresh feed (a knockout only reaches ET from a draw), so a
+// mis-capture waits for the admin rather than settling wrong. Async only to
+// keep live_state fresh without page traffic.
+export async function maybeSettleRegulationGoalBets(): Promise<{ settled: number }> {
+  await refreshLiveObservations();
+  const knockouts = db
+    .prepare(
+      "SELECT id, home_team, away_team FROM matches WHERE status = 'scheduled' AND group_name IS NULL AND kickoff <= ?"
+    )
+    .all(nowIso()) as Pick<Match, "id" | "home_team" | "away_team">[];
+  let total = 0;
+  for (const m of knockouts) {
+    const reg = getKnockoutRegulationResult(m.id);
+    if (!reg) continue; // not in ET, feed stale, or score not a clean draw
+    const regData: ResultData = {
+      homeScore: reg.home,
+      awayScore: reg.away,
+      cornersHome: null,
+      cornersAway: null,
+      cardsTotal: null,
+    };
+    const context = `${m.home_team} ${reg.home}-${reg.away} ${m.away_team} (regulation)`;
+    const settledNow = db.transaction(() => {
+      let n = 0;
+      const pending = db
+        .prepare("SELECT * FROM bets WHERE match_id = ? AND status = 'pending'")
+        .all(m.id) as Bet[];
+      for (const bet of pending) {
+        if (isEtPhaseBet(bet)) continue; // extra-time bets settle at completion
+        if (!GOAL_SETTLE_MARKETS.has(bet.market)) continue; // corners/cards wait for the box score
+        if (resolveBet(bet, regData, context)) n++;
+      }
+      // Pre-match parlay legs settle on the regulation result; corner/card legs
+      // (no counts in regData) return pending and settle later.
+      settleParlayLegsForMatch(m.id, regData);
+      return n;
+    })();
+    if (settledNow > 0) {
+      total += settledNow;
+      console.log(
+        `[settle] ${m.home_team} vs ${m.away_team}: ${settledNow} regulation bet(s) on 90' ${reg.home}-${reg.away} (match continues in extra time)`
+      );
+    }
+  }
+  return { settled: total };
+}
+
+// One-off: the Netherlands–Morocco round-of-16 tie (2026-06-30) reached extra
+// time before the regulation-settlement logic above shipped, so its bets were
+// stuck pending through ET. Regulation ended 1-1 (verified from the live feed:
+// the match entered ET at 1-1, no extra-time goals). Settle on that 90' result.
+// Idempotent: settleMatch no-ops once the match is finished, and the caller
+// stamps it run-once in meta.
+export function settleStuckKnockoutNedMarRegulation(): { settled: number } {
+  const m = db
+    .prepare(
+      "SELECT id FROM matches WHERE status = 'scheduled' AND group_name IS NULL AND home_team = 'Netherlands' AND away_team = 'Morocco'"
+    )
+    .get() as { id: number } | undefined;
+  if (!m) return { settled: 0 };
+  const res = settleMatch(m.id, { homeScore: 1, awayScore: 1 });
+  return { settled: res.error ? 0 : (res.settledBets ?? 0) };
+}
+
 // Void a match (e.g. postponed): refund every pending stake.
 export function voidMatch(matchId: number): { error?: string; refunded?: number } {
   try {
@@ -1014,7 +1145,7 @@ export function listOpenBets(): OpenBetRow[] {
     .prepare(
       `SELECT b.*, m.home_team, m.away_team, m.kickoff,
               m.status AS match_status, m.home_score, m.away_score,
-              u.username, u.is_bot
+              u.username, u.is_bot, u.is_admin
        FROM bets b
        JOIN matches m ON m.id = b.match_id
        JOIN users u ON u.id = b.user_id
@@ -1032,7 +1163,7 @@ export function listSettledBets(): OpenBetRow[] {
     .prepare(
       `SELECT b.*, m.home_team, m.away_team, m.kickoff,
               m.status AS match_status, m.home_score, m.away_score,
-              u.username, u.is_bot
+              u.username, u.is_bot, u.is_admin
        FROM bets b
        JOIN matches m ON m.id = b.match_id
        JOIN users u ON u.id = b.user_id
@@ -1154,12 +1285,12 @@ export function listUserParlays(userId: number): ParlayWithLegs[] {
 export function listOpenParlays(): OpenParlayRow[] {
   const parlays = db
     .prepare(
-      `SELECT p.*, u.username, u.is_bot
+      `SELECT p.*, u.username, u.is_bot, u.is_admin
        FROM parlays p JOIN users u ON u.id = p.user_id
        WHERE p.status = 'pending'
        ORDER BY p.created_at DESC, p.id DESC`
     )
-    .all() as (Parlay & { username: string; is_bot: number })[];
+    .all() as (Parlay & { username: string; is_bot: number; is_admin: number })[];
   if (parlays.length === 0) return [];
   const ph = parlays.map(() => "?").join(",");
   const legs = db
@@ -1181,12 +1312,12 @@ export function listOpenParlays(): OpenParlayRow[] {
 export function listSettledParlays(): OpenParlayRow[] {
   const parlays = db
     .prepare(
-      `SELECT p.*, u.username, u.is_bot
+      `SELECT p.*, u.username, u.is_bot, u.is_admin
        FROM parlays p JOIN users u ON u.id = p.user_id
        WHERE p.status IN ('won', 'lost', 'void')
        ORDER BY p.settled_at DESC, p.id DESC`
     )
-    .all() as (Parlay & { username: string; is_bot: number })[];
+    .all() as (Parlay & { username: string; is_bot: number; is_admin: number })[];
   if (parlays.length === 0) return [];
   const ph = parlays.map(() => "?").join(",");
   const legs = db

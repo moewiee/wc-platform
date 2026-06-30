@@ -21,6 +21,7 @@ export interface OpenBetView {
   kind: "single" | "parlay";
   player: string;
   isBot: boolean;
+  isAdmin: boolean;
   avatar: string | null;
   matchId: number; // single: the match; parlay: 0 (legs carry the matches)
   matchLabel: string; // single: "Canada vs Bosnia"; parlay: "Parlay · 3 legs"
@@ -118,13 +119,19 @@ function Select<T extends string>({
 export default function OpenBetsBoard({ bets }: { bets: OpenBetView[] }) {
   const [groupBy, setGroupBy] = useState<GroupBy>("match");
   const [sortBy, setSortBy] = useState<SortBy>("kickoff");
+  // Exclude non-players (tipster bots + admin) to see only real players' bets.
+  const [playersOnly, setPlayersOnly] = useState(false);
   // Live state depends on the clock; compute after mount so SSR and the
   // first client render agree (same pattern as LocalTime).
   const [now, setNow] = useState<number | null>(null);
   useEffect(() => setNow(Date.now()), []);
 
-  const groups = useMemo(() => buildGroups(bets, groupBy, sortBy), [bets, groupBy, sortBy]);
-  const totalStaked = useMemo(() => bets.reduce((s, b) => s + b.stake, 0), [bets]);
+  const visible = useMemo(
+    () => (playersOnly ? bets.filter((b) => !b.isBot && !b.isAdmin) : bets),
+    [bets, playersOnly]
+  );
+  const groups = useMemo(() => buildGroups(visible, groupBy, sortBy), [visible, groupBy, sortBy]);
+  const totalStaked = useMemo(() => visible.reduce((s, b) => s + b.stake, 0), [visible]);
 
   if (bets.length === 0) {
     return (
@@ -159,11 +166,28 @@ export default function OpenBetsBoard({ bets }: { bets: OpenBetView[] }) {
           ]}
           onChange={setSortBy}
         />
+        <button
+          type="button"
+          onClick={() => setPlayersOnly((v) => !v)}
+          aria-pressed={playersOnly}
+          className={`rounded-md border px-3 py-1.5 text-sm font-semibold ${
+            playersOnly
+              ? "border-[#f0b429] bg-[#f0b429]/15 text-[#f0b429]"
+              : "border-[#1b2c4a] bg-[#13243f] text-slate-300"
+          }`}
+        >
+          {playersOnly ? "✓ " : ""}Players only
+        </button>
         <span className="ml-auto text-xs text-slate-400">
-          {bets.length} bets · {fmtPts(totalStaked)} pts in play
+          {visible.length} bets · {fmtPts(totalStaked)} pts in play
         </span>
       </div>
 
+      {groups.length === 0 ? (
+        <div className="rounded-lg border border-[#1b2c4a] bg-[#0e1c33] p-8 text-center text-slate-400">
+          No players&apos; bets in play right now.
+        </div>
+      ) : (
       <div className="space-y-4">
         {groups.map((g) => (
           <div key={g.key} className="overflow-hidden rounded-lg border border-[#1b2c4a]">
@@ -282,6 +306,7 @@ export default function OpenBetsBoard({ bets }: { bets: OpenBetView[] }) {
           </div>
         ))}
       </div>
+      )}
     </div>
   );
 }

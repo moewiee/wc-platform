@@ -263,7 +263,12 @@ function buildMarkets(
   match: Match,
   maxAgeMs: number,
   allowStoredH2h: boolean,
-  inPlay: boolean
+  inPlay: boolean,
+  // Extra-time play: a knockout re-opens in-play for goal markets ONLY (goal
+  // Asian handicap + goal totals). 1X2/BTTS/correct-score/corners/cards are not
+  // offered in ET (settlement basis would be ambiguous), so the sheet is
+  // filtered to the two goal families.
+  etGoalsOnly = false
 ): MatchMarket[] {
   const real = loadRealQuotes(match.id, maxAgeMs, inPlay);
   const markets: MatchMarket[] = [];
@@ -346,6 +351,9 @@ function buildMarkets(
     }
   }
 
+  if (etGoalsOnly) {
+    return markets.filter((m) => m.market === "ah_goals" || m.market === "ou_goals");
+  }
   return markets;
 }
 
@@ -357,8 +365,8 @@ export function marketsForMatch(match: Match): MatchMarket[] {
 
 // In-play sheet: live (in_play=1) quotes only, tight freshness (stale ⇒ empty ⇒
 // suspended), live moneyline only for 1X2 (never the stale pre-match anchor).
-export function liveMarketsForMatch(match: Match): MatchMarket[] {
-  return buildMarkets(match, LIVE_QUOTE_FRESH_MS, false, true);
+export function liveMarketsForMatch(match: Match, etGoalsOnly = false): MatchMarket[] {
+  return buildMarkets(match, LIVE_QUOTE_FRESH_MS, false, true, etGoalsOnly);
 }
 
 function findIn(
@@ -392,9 +400,10 @@ export function findLiveSelection(
   match: Match,
   market: MarketType,
   line: number | null,
-  selection: string
+  selection: string,
+  etGoalsOnly = false
 ): { odds: number; label: string; marketName: string } | null {
-  return findIn(liveMarketsForMatch(match), market, line, selection);
+  return findIn(liveMarketsForMatch(match, etGoalsOnly), market, line, selection);
 }
 
 // ── Settlement ──────────────────────────────────────────────────────────────

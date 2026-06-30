@@ -81,6 +81,9 @@ interface LiveStateRow {
   suspend_until: string | null;
   corners_home: number | null;
   corners_away: number | null;
+  period: number | null;
+  reg_home_score: number | null;
+  reg_away_score: number | null;
 }
 
 export interface LiveContext {
@@ -91,6 +94,7 @@ export interface LiveContext {
   awayScore: number;
   minute: number | null;
   clock: string;
+  period: number | null; // 1-2 regulation, 3-4 extra time, 5 penalties
 }
 
 declare global {
@@ -130,15 +134,26 @@ function liveMinute(s: EspnLiveScore): number | null {
     return null;
   }
   // Prefer the running display clock ("67'", "45'+2"); fall back to seconds.
+  // Cap at 130 (not 90) so extra-time minutes keep ADVANCING — otherwise a
+  // frozen capped minute would trip the freeze detector and wrongly suspend ET.
   const dc = (s.displayClock || "").match(/(\d{1,3})/);
   if (dc) {
     const m = Number(dc[1]);
-    if (m >= 1 && m <= 130) return Math.min(m, 95);
+    if (m >= 1 && m <= 130) return Math.min(m, 130);
   }
   if (typeof s.clockSeconds === "number" && s.clockSeconds > 0) {
-    return Math.min(Math.floor(s.clockSeconds / 60), 95);
+    return Math.min(Math.floor(s.clockSeconds / 60), 130);
   }
   return null;
+}
+
+// A knockout match has left regulation (90'+stoppage) once the feed reports
+// extra time or penalties. ESPN signals this with period >= 3 and/or a status
+// name like STATUS_OVERTIME / STATUS_FINAL_PEN / STATUS_*_EXTRATIME. Used to
+// freeze the regulation score: betting settles on the 90' result, never ET.
+function leftRegulation(s: EspnLiveScore): boolean {
+  if (s.period != null && s.period >= 3) return true;
+  return /OVERTIME|EXTRA|PEN|SHOOTOUT/i.test(s.statusName);
 }
 
 const getStateRow = db.prepare("SELECT * FROM live_state WHERE match_id = ?");
@@ -146,10 +161,10 @@ const upsertState = db.prepare(`
   INSERT INTO live_state
     (match_id, home_score, away_score, minute, state, detail,
      observed_at, minute_seen_at, last_change_at, suspend_until,
-     corners_home, corners_away)
+     corners_home, corners_away, period, reg_home_score, reg_away_score)
   VALUES (@match_id, @home_score, @away_score, @minute, @state, @detail,
           @observed_at, @minute_seen_at, @last_change_at, @suspend_until,
-          @corners_home, @corners_away)
+          @corners_home, @corners_away, @period, @reg_home_score, @reg_away_score)
   ON CONFLICT(match_id) DO UPDATE SET
     home_score = excluded.home_score,
     away_score = excluded.away_score,
@@ -161,7 +176,10 @@ const upsertState = db.prepare(`
     last_change_at = excluded.last_change_at,
     suspend_until = excluded.suspend_until,
     corners_home = excluded.corners_home,
-    corners_away = excluded.corners_away
+    corners_away = excluded.corners_away,
+    period = excluded.period,
+    reg_home_score = excluded.reg_home_score,
+    reg_away_score = excluded.reg_away_score
 `);
 
 // Persist the latest feed observation for every started, unsettled match.
@@ -187,6 +205,14 @@ function syncLiveState(feed: EspnLiveScore[]): void {
       const scoreChanged =
         !!prev && (prev.home_score !== s.home_score || prev.away_score !== s.away_score);
       const minuteUnchanged = !!prev && prev.minute === minute && minute !== null;
+      // Freeze the regulation (90') score: while the match is still in
+      // regulation, track the live score; once it enters extra time/penalties,
+      // keep the last regulation value. This is what knockout bets settle on —
+      // ET goals never count. (Group matches can't reach ET, so this is just
+      // their final score.)
+      const inEt = leftRegulation(s);
+      const regHome = inEt ? (prev?.reg_home_score ?? null) : s.home_score;
+      const regAway = inEt ? (prev?.reg_away_score ?? null) : s.away_score;
       upsertState.run({
         match_id: m.id,
         home_score: s.home_score,
@@ -204,6 +230,9 @@ function syncLiveState(feed: EspnLiveScore[]): void {
           : (prev?.suspend_until ?? null),
         corners_home: s.corners_home,
         corners_away: s.corners_away,
+        period: s.period,
+        reg_home_score: regHome,
+        reg_away_score: regAway,
       });
     }
   })();
@@ -290,6 +319,55 @@ export async function refreshLiveObservations(): Promise<void> {
   await refreshLiveState(FRESH_TTL_MS);
 }
 
+// The live match period (ESPN status.period), or null if unknown. 1-2 =
+// regulation, 3-4 = extra time, 5 = penalties.
+export function getLivePeriod(matchId: number): number | null {
+  const row = getStateRow.get(matchId) as LiveStateRow | undefined;
+  return row?.period ?? null;
+}
+
+// True while a match is in extra-time play (period 3-4) — when knockout in-play
+// re-opens for goal markets only.
+export function isMatchInEt(matchId: number): boolean {
+  const p = getLivePeriod(matchId);
+  return p === 3 || p === 4;
+}
+
+// The frozen regulation (90') goal score to grade regulation-phase bets on,
+// returned ONLY when the match actually left regulation for extra time/penalties
+// (period >= 3) — that is the one case where the recorded final score includes
+// extra-time goals and so diverges from the 90' result. For a match still in or
+// decided within regulation, this returns null and the caller uses the final
+// score directly (which IS the regulation result) — crucially avoiding a stale
+// frozen value if our last live observation missed a late regulation goal.
+export function getFrozenRegulationScore(
+  matchId: number
+): { home: number; away: number } | null {
+  const row = getStateRow.get(matchId) as LiveStateRow | undefined;
+  if (!row || row.reg_home_score == null || row.reg_away_score == null) return null;
+  if (row.period == null || row.period < 3) return null; // never went to ET → final is the 90' result
+  return { home: row.reg_home_score, away: row.reg_away_score };
+}
+
+// The regulation (90') result for a knockout match that has reached extra time,
+// or null when we shouldn't auto-settle on it yet. A knockout only reaches ET
+// from a DRAW, so the captured regulation score must be level — if it isn't, we
+// mis-captured (e.g. never observed the match in regulation) and fail closed so
+// an admin settles manually. The feed must be fresh, and the regulation score
+// must have been frozen (reg_* set, period in ET range). ET/penalty goals are
+// never included: settlement is the frozen regulation score.
+export function getKnockoutRegulationResult(
+  matchId: number
+): { home: number; away: number } | null {
+  const row = getStateRow.get(matchId) as LiveStateRow | undefined;
+  if (!row) return null;
+  if (row.period == null || row.period < 3) return null; // not in ET/penalties yet
+  if (row.reg_home_score == null || row.reg_away_score == null) return null; // never frozen
+  if (Date.now() - Date.parse(row.observed_at) > STALE_MS) return null; // feed gone quiet
+  if (row.reg_home_score !== row.reg_away_score) return null; // not a draw ⇒ mis-captured
+  return { home: row.reg_home_score, away: row.reg_away_score };
+}
+
 // Has this match a live (in_play=1) quote written within the placement window?
 // Used to fail closed at placement when the force-fetch couldn't refresh.
 export function hasFreshLiveQuote(matchId: number): boolean {
@@ -337,9 +415,13 @@ function contextFromRow(match: Match, row: LiveStateRow | undefined): LiveContex
       awayScore: 0,
       minute: null,
       clock: "LIVE",
+      period: null,
     };
   }
   const minute = row.minute;
+  const period = row.period;
+  const inEt = period === 3 || period === 4; // extra-time play
+  const inPens = period != null && period >= 5; // penalty shootout
   const clock =
     row.state === "post" ? "FT" : minute !== null ? `${minute}'` : row.detail || "LIVE";
   const base = {
@@ -348,17 +430,22 @@ function contextFromRow(match: Match, row: LiveStateRow | undefined): LiveContex
     awayScore: row.away_score,
     minute,
     clock,
+    period,
   };
   const susp = (reason: string): LiveContext => ({ ...base, suspended: true, reason });
   const now = Date.now();
   if (row.state === "post") return susp("Match finished — settling.");
+  // Penalty shootout: no markets settle on the shootout, so betting is closed.
+  if (inPens) return susp("Penalty shootout — betting closed.");
   if (now - Date.parse(row.observed_at) > STALE_MS) return susp("Reconnecting to the live feed…");
-  if (minute === null) return susp("Half-time — betting resumes shortly.");
+  if (minute === null) return susp("Interval — betting resumes shortly."); // HT, ET break, etc.
   if (now - Date.parse(row.minute_seen_at) > FROZEN_MS) return susp("Play paused — prices updating.");
   if (row.suspend_until && Date.parse(row.suspend_until) > now)
     return susp("Prices updating after a goal…");
-  if (!match.group_name && minute >= KO_SUSPEND_FROM_MINUTE)
-    return susp("In-play paused — knockout heading for extra time.");
+  // A knockout heading into extra time is suspended through the late-regulation
+  // snipe window, then RE-OPENS for goal markets during ET play (period 3-4).
+  if (!match.group_name && !inEt && minute >= KO_SUSPEND_FROM_MINUTE)
+    return susp("In-play paused — end of regulation.");
   return { ...base, suspended: false, reason: "" };
 }
 

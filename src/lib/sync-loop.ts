@@ -1,4 +1,9 @@
-import { correctInPlayAhSettlement, maybeEarlyResolve } from "./bets";
+import {
+  correctInPlayAhSettlement,
+  maybeEarlyResolve,
+  maybeSettleRegulationGoalBets,
+  settleStuckKnockoutNedMarRegulation,
+} from "./bets";
 import { getMeta, setMeta } from "./db";
 import { maybeRefreshMarketOdds, maybeRefreshOdds, maybeSyncScores } from "./matches";
 import { maybeGenerateAiTips } from "./tips";
@@ -30,6 +35,15 @@ async function tick(): Promise<void> {
   } catch (e) {
     console.error("[sync] score sync failed:", e instanceof Error ? e.message : e);
   }
+  // Settle regulation-phase goal bets the moment a knockout enters extra time
+  // (keeps the match open for ET betting) — BEFORE early-resolve, so a regulation
+  // bet is graded on the 90' score and never locked on the ET-inclusive total.
+  try {
+    const res = await maybeSettleRegulationGoalBets();
+    if (res.settled > 0) console.log(`[sync] settled ${res.settled} regulation bet(s) at full time (knockout → extra time)`);
+  } catch (e) {
+    console.error("[sync] regulation goal settle failed:", e instanceof Error ? e.message : e);
+  }
   try {
     const res = await maybeEarlyResolve();
     if (res.resolved > 0) console.log(`[sync] early-resolved ${res.resolved} locked bets`);
@@ -59,14 +73,29 @@ async function tick(): Promise<void> {
 
 // One-off data corrections, run once ever (stamped in `meta`), before the loop.
 const RESETTLE_AH_KEY = "inplay_ah_resettle_v1";
+const SETTLE_NEDMAR_KEY = "settle_nedmar_regulation_v1";
 function runOneOffCorrections(): void {
-  try {
-    if (getMeta(RESETTLE_AH_KEY) !== null) return;
-    const res = correctInPlayAhSettlement();
-    setMeta(RESETTLE_AH_KEY, new Date().toISOString());
-    console.log(`[correct] in-play AH re-settle: ${res.corrected} bets corrected`);
-  } catch (e) {
-    console.error("[correct] in-play AH re-settle failed:", e instanceof Error ? e.message : e);
+  if (getMeta(RESETTLE_AH_KEY) === null) {
+    try {
+      const res = correctInPlayAhSettlement();
+      setMeta(RESETTLE_AH_KEY, new Date().toISOString());
+      console.log(`[correct] in-play AH re-settle: ${res.corrected} bets corrected`);
+    } catch (e) {
+      console.error("[correct] in-play AH re-settle failed:", e instanceof Error ? e.message : e);
+    }
+  }
+  // Netherlands–Morocco reached ET while bets were stuck pending; settle it on
+  // the 1-1 regulation result (see settleStuckKnockoutNedMarRegulation).
+  if (getMeta(SETTLE_NEDMAR_KEY) === null) {
+    try {
+      const res = settleStuckKnockoutNedMarRegulation();
+      setMeta(SETTLE_NEDMAR_KEY, new Date().toISOString());
+      if (res.settled > 0) {
+        console.log(`[correct] Netherlands–Morocco settled on regulation 1-1: ${res.settled} bets`);
+      }
+    } catch (e) {
+      console.error("[correct] NED–MAR regulation settle failed:", e instanceof Error ? e.message : e);
+    }
   }
 }
 
